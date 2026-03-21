@@ -17,6 +17,12 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("Metal"),
                 .linkedFramework("QuartzCore"),
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/Info.plist",
+                ]),
             ]
         ),
     ]

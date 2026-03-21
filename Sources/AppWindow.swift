@@ -151,7 +151,39 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - NSApplicationDelegate
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Window is already created in init
+        setupMenuBar()
+    }
+
+    private func setupMenuBar() {
+        let mainMenu = NSMenu()
+
+        // App menu (bold name in menu bar)
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About Hypervisor",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit Hypervisor",
+                        action: #selector(NSApplication.terminate(_:)),
+                        keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+
+        // Window menu
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize",
+                           action: #selector(NSWindow.miniaturize(_:)),
+                           keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Close",
+                           action: #selector(NSWindow.performClose(_:)),
+                           keyEquivalent: "w")
+        windowMenuItem.submenu = windowMenu
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
