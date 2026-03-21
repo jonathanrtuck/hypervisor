@@ -16,9 +16,8 @@ import Hypervisor
 import Metal
 
 /// Global flag set by SIGUSR1 signal handler. Checked by VirtioMetal on each frame.
-nonisolated(unsafe) var _signalCaptureFlag: Bool = false
-/// Global reference to the Metal backend for signal-triggered captures.
-nonisolated(unsafe) weak var _metalBackendForCapture: VirtioMetalBackend?
+/// Uses Int32 (matches sig_atomic_t) for signal-handler safety.
+nonisolated(unsafe) var _signalCaptureFlag: Int32 = 0
 
 // MARK: - Argument parsing
 
@@ -224,7 +223,6 @@ func main() throws {
     vm.addVirtioDevice(slot: 2, backend: tablet)
 
     // Slot 3: Metal GPU (if GPU mode)
-    var metalBackend: VirtioMetalBackend?
     var appWindow: AppWindow?
 
     if !config.noGpu {
@@ -240,14 +238,12 @@ func main() throws {
         backend.captureAtFrame = config.captureFrame
         backend.capturePath = config.capturePath
         backend.exitAfterCapture = config.captureFrame >= 0
-        metalBackend = backend
         vm.addVirtioDevice(slot: 3, backend: backend)
         print("  GPU: Metal passthrough (slot 3)")
 
         // SIGUSR1 triggers ad-hoc screenshot capture.
-        _metalBackendForCapture = backend
         signal(SIGUSR1) { _ in
-            _signalCaptureFlag = true
+            _signalCaptureFlag = 1
         }
     }
 

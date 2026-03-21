@@ -31,6 +31,7 @@ final class VirtioInputBackend: VirtioDeviceBackend {
     let deviceFeatures: UInt64 = 0
     let numQueues: Int = 2     // event queue + status queue
     let maxQueueSize: UInt32 = 64
+    weak var transport: VirtioMMIOTransport?
 
     /// Config select/subsel state (written by guest to query different configs).
     private var configSelect: UInt8 = 0
@@ -42,11 +43,17 @@ final class VirtioInputBackend: VirtioDeviceBackend {
     /// Whether this is a keyboard or tablet.
     let isKeyboard: Bool
 
-    /// Last seen available ring index for the event queue.
+    /// Lock protecting pendingEvents and lastAvailIdx.
+    /// These are accessed from the main (AppKit) thread via injectEvent()
+    /// and from vCPU threads via handleNotify().
+    private let eventLock = NSLock()
+
+    /// Last seen available ring index for the event queue. Protected by eventLock.
     private var lastAvailIdx: UInt16 = 0
 
     /// Pending events to be delivered when buffers become available.
     /// Capped at 256 entries — if the guest isn't consuming buffers, oldest events are dropped.
+    /// Protected by eventLock.
     private var pendingEvents: [(UInt16, UInt16, UInt32)] = []  // (type, code, value)
     private let maxPendingEvents = 256
 
@@ -139,26 +146,32 @@ final class VirtioInputBackend: VirtioDeviceBackend {
         if queue == 0 {
             // Event queue — guest posted new writable buffers.
             // Deliver any pending events.
-            deliverPendingEvents(state: state, vm: vm)
+            eventLock.lock()
+            deliverPendingEventsLocked(state: state, vm: vm)
+            eventLock.unlock()
         }
         // Queue 1 (status) — guest config queries, ignore for now.
     }
 
     // MARK: - Event injection
 
-    /// Inject an input event. Called from the host (keyboard/mouse handler).
+    /// Inject an input event. Called from the host (keyboard/mouse handler on main thread).
     /// If guest buffers are available, delivers immediately. Otherwise queues.
+    /// Thread-safe: acquires eventLock.
     func injectEvent(type: UInt16, code: UInt16, value: UInt32,
                      state: VirtqueueState, vm: VirtualMachine) {
+        eventLock.lock()
         // Drop oldest events if the queue is full (guest not consuming buffers).
         if pendingEvents.count >= maxPendingEvents {
             pendingEvents.removeFirst()
         }
         pendingEvents.append((type, code, value))
-        deliverPendingEvents(state: state, vm: vm)
+        deliverPendingEventsLocked(state: state, vm: vm)
+        eventLock.unlock()
     }
 
-    private func deliverPendingEvents(state: VirtqueueState, vm: VirtualMachine) {
+    /// Deliver pending events to guest buffers. Caller must hold eventLock.
+    private func deliverPendingEventsLocked(state: VirtqueueState, vm: VirtualMachine) {
         while !pendingEvents.isEmpty {
             guard let request = virtqueuePopAvail(state: state, vm: vm, lastSeenIdx: &lastAvailIdx) else {
                 break  // No buffers available
@@ -182,7 +195,7 @@ final class VirtioInputBackend: VirtioDeviceBackend {
             virtqueuePushUsed(state: state, vm: vm, headIndex: request.headIndex, bytesWritten: 8)
 
             // Raise interrupt
-            if let transport = vm.virtioDevices.values.first(where: { $0.backend === self }) {
+            if let transport = self.transport {
                 transport.raiseInterrupt()
                 hv_gic_set_spi(transport.irq, true)
             }

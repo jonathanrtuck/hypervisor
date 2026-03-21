@@ -40,6 +40,7 @@ final class Virtio9PBackend: VirtioDeviceBackend {
     let deviceFeatures: UInt64 = 1  // VIRTIO_9P_MOUNT_TAG
     let numQueues: Int = 1
     let maxQueueSize: UInt32 = 128
+    weak var transport: VirtioMMIOTransport?
 
     /// Root directory on the host to serve.
     let rootPath: String
@@ -135,7 +136,7 @@ final class Virtio9PBackend: VirtioDeviceBackend {
         virtqueuePushUsed(state: state, vm: vm, headIndex: headIdx, bytesWritten: UInt32(responseLen))
 
         // Raise interrupt so guest knows response is ready
-        if let transport = vm.virtioDevices.values.first(where: { $0.backend === self }) {
+        if let transport = self.transport {
             transport.raiseInterrupt()
         }
     }
@@ -310,31 +311,33 @@ final class Virtio9PBackend: VirtioDeviceBackend {
 // MARK: - P9Writer
 
 /// Writes 9P response messages into a guest memory buffer.
+/// Tracks overflow so callers can detect truncated responses.
 private struct P9Writer {
     let buf: UnsafeMutableRawPointer
     let capacity: Int
     var pos: Int = 4  // Skip size field (written at finish)
+    private(set) var overflow: Bool = false
 
     mutating func putU8(_ v: UInt8) {
-        guard pos + 1 <= capacity else { return }
+        guard pos + 1 <= capacity else { overflow = true; return }
         buf.storeBytes(of: v, toByteOffset: pos, as: UInt8.self)
         pos += 1
     }
 
     mutating func putU16(_ v: UInt16) {
-        guard pos + 2 <= capacity else { return }
+        guard pos + 2 <= capacity else { overflow = true; return }
         buf.storeBytes(of: v.littleEndian, toByteOffset: pos, as: UInt16.self)
         pos += 2
     }
 
     mutating func putU32(_ v: UInt32) {
-        guard pos + 4 <= capacity else { return }
+        guard pos + 4 <= capacity else { overflow = true; return }
         buf.storeBytes(of: v.littleEndian, toByteOffset: pos, as: UInt32.self)
         pos += 4
     }
 
     mutating func putU64(_ v: UInt64) {
-        guard pos + 8 <= capacity else { return }
+        guard pos + 8 <= capacity else { overflow = true; return }
         buf.storeBytes(of: v.littleEndian, toByteOffset: pos, as: UInt64.self)
         pos += 8
     }
@@ -342,7 +345,7 @@ private struct P9Writer {
     mutating func putString(_ s: String) {
         let bytes = Array(s.utf8)
         putU16(UInt16(bytes.count))
-        guard pos + bytes.count <= capacity else { return }
+        guard pos + bytes.count <= capacity else { overflow = true; return }
         for (i, byte) in bytes.enumerated() {
             buf.storeBytes(of: byte, toByteOffset: pos + i, as: UInt8.self)
         }
@@ -350,7 +353,7 @@ private struct P9Writer {
     }
 
     mutating func putData(_ data: Data) {
-        guard pos + data.count <= capacity else { return }
+        guard pos + data.count <= capacity else { overflow = true; return }
         data.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
             buf.advanced(by: pos).copyMemory(from: src.baseAddress!, byteCount: src.count)
         }
@@ -358,7 +361,19 @@ private struct P9Writer {
     }
 
     /// Write the size field and return total response length.
+    /// If overflow occurred, rewrites the buffer as an RLERROR (EIO).
     mutating func finish() -> Int {
+        if overflow {
+            fputs("[9p] WARNING: response truncated (capacity=\(capacity), needed=\(pos))\n", stderr)
+            // Rewrite as error response: size(4) + RLERROR(1) + tag=0(2) + EIO(4) = 11 bytes
+            pos = 4
+            buf.storeBytes(of: UInt8(7), toByteOffset: pos, as: UInt8.self)  // P9_RLERROR
+            pos += 1
+            buf.storeBytes(of: UInt16(0).littleEndian, toByteOffset: pos, as: UInt16.self)  // tag 0
+            pos += 2
+            buf.storeBytes(of: UInt32(5).littleEndian, toByteOffset: pos, as: UInt32.self)  // EIO
+            pos += 4
+        }
         buf.storeBytes(of: UInt32(pos).littleEndian, toByteOffset: 0, as: UInt32.self)
         return pos
     }

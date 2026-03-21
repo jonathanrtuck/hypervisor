@@ -42,8 +42,10 @@ final class VirtualMachine {
     var virtioDevices: [Int: VirtioMMIOTransport] = [:]
 
     /// PSCI: tracks which vCPUs have been started and their entry points.
+    /// Protected by `psciLock` — accessed from multiple vCPU threads during CPU_ON.
     var vcpuEntries: [(entryAddr: UInt64, contextId: UInt64)] = []
     var vcpuStarted: [Bool] = []
+    let psciLock = NSLock()
 
     init(ramSize: Int, ramBase: UInt64, verbose: Bool) throws {
         self.ramBase = ramBase
@@ -52,6 +54,8 @@ final class VirtualMachine {
 
         // Create the VM
         try hvCheck(hv_vm_create(nil), "hv_vm_create")
+        // Ensure hv_vm_destroy runs even if exit() is called (bypassing deinit).
+        atexit { hv_vm_destroy() }
         if verbose { print("  VM created") }
 
         // Create hardware GIC (must be after VM, before vCPUs)
@@ -94,22 +98,30 @@ final class VirtualMachine {
     }
 
     /// Write data into guest memory at a guest physical address.
+    /// Validates both start and end of the write fall within guest RAM.
     func writeGuest(at gpa: UInt64, data: Data) {
-        guard let host = guestToHost(gpa) else {
-            print("WARNING: writeGuest out of range: 0x\(String(gpa, radix: 16))")
+        let offset = gpa &- ramBase
+        guard offset < UInt64(ramSize),
+              offset &+ UInt64(data.count) <= UInt64(ramSize) else {
+            print("WARNING: writeGuest out of range: 0x\(String(gpa, radix: 16)) len=\(data.count)")
             return
         }
+        let host = ramPtr.advanced(by: Int(offset))
         data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) -> Void in
             memcpy(host, buf.baseAddress!, buf.count)
         }
     }
 
     /// Write bytes into guest memory.
+    /// Validates both start and end of the write fall within guest RAM.
     func writeGuest(at gpa: UInt64, bytes: UnsafeRawPointer, count: Int) {
-        guard let host = guestToHost(gpa) else {
-            print("WARNING: writeGuest out of range: 0x\(String(gpa, radix: 16))")
+        let offset = gpa &- ramBase
+        guard offset < UInt64(ramSize),
+              offset &+ UInt64(count) <= UInt64(ramSize) else {
+            print("WARNING: writeGuest out of range: 0x\(String(gpa, radix: 16)) len=\(count)")
             return
         }
+        let host = ramPtr.advanced(by: Int(offset))
         memcpy(host, bytes, count)
     }
 

@@ -69,6 +69,10 @@ protocol VirtioDeviceBackend: AnyObject {
     /// Maximum queue size per queue.
     var maxQueueSize: UInt32 { get }
 
+    /// Back-reference to the MMIO transport (set after registration).
+    /// Used to raise interrupts without linear scan.
+    var transport: VirtioMMIOTransport? { get set }
+
     /// Called when the guest writes to QUEUE_NOTIFY for the given queue index.
     /// The transport provides the queue state and a reference to guest memory.
     func handleNotify(queue: Int, state: VirtqueueState, vm: VirtualMachine)
@@ -94,7 +98,15 @@ final class VirtioMMIOTransport {
     private var driverFeatures: UInt64 = 0
     private var selectedQueue: UInt32 = 0
     private var queues: [VirtqueueState]
-    private(set) var interruptStatus: UInt32 = 0
+    private var _interruptStatus: UInt32 = 0
+    private let interruptLock = NSLock()
+
+    /// Thread-safe read of interrupt status.
+    var interruptStatus: UInt32 {
+        interruptLock.lock()
+        defer { interruptLock.unlock() }
+        return _interruptStatus
+    }
 
     weak var vm: VirtualMachine?
 
@@ -103,6 +115,7 @@ final class VirtioMMIOTransport {
         self.guestPA = guestPA
         self.irq = irq
         self.queues = Array(repeating: VirtqueueState(), count: backend.numQueues)
+        backend.transport = self
     }
 
     /// Handle an MMIO read from the guest.
@@ -217,7 +230,7 @@ final class VirtioMMIOTransport {
             }
 
         case REG_INTERRUPT_ACK:
-            interruptStatus &= ~value
+            acknowledgeInterrupt(value)
 
         case REG_STATUS:
             if value == 0 {
@@ -239,8 +252,18 @@ final class VirtioMMIOTransport {
     }
 
     /// Raise an interrupt (set status bit, to be delivered to guest via GIC).
+    /// Thread-safe: may be called from vCPU threads or the main (AppKit) thread.
     func raiseInterrupt() {
-        interruptStatus |= 1  // Used buffer notification
+        interruptLock.lock()
+        _interruptStatus |= 1  // Used buffer notification
+        interruptLock.unlock()
+    }
+
+    /// Acknowledge (clear) interrupt bits. Called from guest MMIO write.
+    func acknowledgeInterrupt(_ mask: UInt32) {
+        interruptLock.lock()
+        _interruptStatus &= ~mask
+        interruptLock.unlock()
     }
 
     /// Access the current state of a virtqueue (for input event injection from the host).
@@ -258,6 +281,7 @@ final class NullDeviceBackend: VirtioDeviceBackend {
     let deviceFeatures: UInt64 = 0
     let numQueues: Int = 1
     let maxQueueSize: UInt32 = 128
+    weak var transport: VirtioMMIOTransport?
 
     init(deviceId: UInt32) {
         self.deviceId = deviceId

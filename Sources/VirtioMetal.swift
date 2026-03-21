@@ -35,6 +35,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     let deviceFeatures: UInt64 = (1 << 32)  // VIRTIO_F_VERSION_1
     let numQueues: Int = 2           // setup + render
     let maxQueueSize: UInt32 = 256
+    weak var transport: VirtioMMIOTransport?
 
     var verbose = false
 
@@ -225,7 +226,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 libraries[handle] = lib
                 if verbose { print("VirtioMetal: compiled library \(handle)") }
             } catch {
-                fatalError("VirtioMetal: shader compilation failed for handle \(handle): \(error)")
+                print("VirtioMetal: shader compilation failed for handle \(handle): \(error)")
             }
 
         case .getFunction:
@@ -349,7 +350,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let width  = payload.loadUnaligned(fromByteOffset: 4, as: UInt16.self)
             let height = payload.loadUnaligned(fromByteOffset: 6, as: UInt16.self)
             let format = payload.loadUnaligned(fromByteOffset: 8, as: UInt8.self)
-            let _ = payload.loadUnaligned(fromByteOffset: 9, as: UInt8.self) // texture type (reserved)
+            let textureType = payload.loadUnaligned(fromByteOffset: 9, as: UInt8.self)
             let samples = payload.loadUnaligned(fromByteOffset: 10, as: UInt8.self)
             let usage   = payload.loadUnaligned(fromByteOffset: 11, as: UInt8.self)
 
@@ -372,7 +373,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
             if let tex = device.makeTexture(descriptor: desc) {
                 textures[handle] = tex
-                if verbose { print("VirtioMetal: texture \(handle) (\(width)×\(height))") }
+                if verbose { print("VirtioMetal: texture \(handle) (\(width)×\(height) type=\(textureType))") }
             }
 
         case .uploadTexture:
@@ -632,8 +633,8 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
         case .presentAndCommit:
             // Check SIGUSR1 signal flag (set from signal handler).
-            if _signalCaptureFlag {
-                _signalCaptureFlag = false
+            if _signalCaptureFlag != 0 {
+                _signalCaptureFlag = 0
                 captureNextFrame = true
             }
             let shouldCapture = captureNextFrame
@@ -683,7 +684,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     // MARK: - Interrupt delivery
 
     private func raiseInterrupt(vm: VirtualMachine) {
-        if let transport = vm.virtioDevices.values.first(where: { $0.backend === self }) {
+        if let transport = self.transport {
             transport.raiseInterrupt()
             hv_gic_set_spi(transport.irq, true)
         }

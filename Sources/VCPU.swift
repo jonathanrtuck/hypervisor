@@ -162,7 +162,7 @@ final class VCPU {
                     let spsr = try getSysReg(HV_SYS_REG_SPSR_EL1)
                     let esr = try getSysReg(HV_SYS_REG_ESR_EL1)
                     let far = try getSysReg(HV_SYS_REG_FAR_EL1)
-                    let sp = try getReg(HV_REG_FP)  // x29
+                    let fp = try getReg(HV_REG_FP)  // x29 (frame pointer)
                     let x0 = try getReg(HV_REG_X0)
                     let x1 = try getReg(HV_REG_X1)
                     let x24 = try getReg(hv_reg_t(rawValue: HV_REG_X0.rawValue + 24))
@@ -170,7 +170,7 @@ final class VCPU {
                     print("    ESR_EL1=0x\(String(esr, radix: 16)) (guest exception syndrome)")
                     print("    FAR_EL1=0x\(String(far, radix: 16)) (fault address)")
                     print("    SPSR_EL1=0x\(String(spsr, radix: 16))")
-                    print("    x0=0x\(String(x0, radix: 16)) x1=0x\(String(x1, radix: 16))")
+                    print("    FP=0x\(String(fp, radix: 16)) x0=0x\(String(x0, radix: 16)) x1=0x\(String(x1, radix: 16))")
                     print("    x24=0x\(String(x24, radix: 16)) (saved DTB addr)")
                 }
             }
@@ -256,7 +256,7 @@ final class VCPU {
     private func handleDataAbort(_ syndrome: UInt64) throws {
         let isWrite = (syndrome >> 6) & 1 == 1
         let srt = Int((syndrome >> 16) & 0x1F)  // Transfer register
-        let _ = Int((syndrome >> 22) & 0x3)       // Access size (unused in Phase 1)
+        let accessSize = Int((syndrome >> 22) & 0x3)  // 0=byte, 1=u16, 2=u32, 3=u64
         let pa = exitInfo.pointee.exception.physical_address
 
         let pc = try getReg(HV_REG_PC)
@@ -310,7 +310,7 @@ final class VCPU {
             }
         } else {
             print("vCPU[\(index)]: unhandled MMIO \(isWrite ? "write" : "read") " +
-                  "PA=0x\(String(pa, radix: 16)) at PC=0x\(String(pc, radix: 16))")
+                  "PA=0x\(String(pa, radix: 16)) size=\(1 << accessSize) at PC=0x\(String(pc, radix: 16))")
             running = false
             return
         }
@@ -340,10 +340,16 @@ final class VCPU {
                 print("  PSCI CPU_ON: cpu=\(targetCpu) entry=0x\(String(entryAddr, radix: 16))")
             }
 
-            if targetCpu < vm.vcpuStarted.count && !vm.vcpuStarted[targetCpu] {
+            // Lock protects vcpuStarted/vcpuEntries — multiple vCPUs may issue CPU_ON concurrently.
+            vm.psciLock.lock()
+            let shouldStart = targetCpu < vm.vcpuStarted.count && !vm.vcpuStarted[targetCpu]
+            if shouldStart {
                 vm.vcpuStarted[targetCpu] = true
                 vm.vcpuEntries[targetCpu] = (entryAddr, contextId)
+            }
+            vm.psciLock.unlock()
 
+            if shouldStart {
                 // Spawn secondary vCPU on a new thread
                 let vm = self.vm
                 let cpuIdx = targetCpu
