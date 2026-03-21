@@ -261,15 +261,28 @@ final class VCPU {
 
         let pc = try getReg(HV_REG_PC)
 
+        // Helper: read the transfer register value. Register 31 in load/store
+        // context is the zero register (XZR/WZR), NOT the stack pointer.
+        // Hypervisor.framework's hv_vcpu_get_reg returns SP for index 31,
+        // so we must special-case it.
+        func readSrt() throws -> UInt64 {
+            if srt == 31 { return 0 }
+            return try getReg(hv_reg_t(rawValue: UInt32(srt)))
+        }
+        func writeSrt(_ val: UInt64) throws {
+            if srt == 31 { return }  // writes to XZR are discarded
+            try setReg(hv_reg_t(rawValue: UInt32(srt)), val)
+        }
+
         if pa >= UART_BASE && pa < UART_BASE + UART_SIZE {
             // PL011 UART
             let offset = pa - UART_BASE
             if isWrite {
-                let val = try getReg(hv_reg_t(rawValue: UInt32(srt)))
+                let val = try readSrt()
                 vm.uart.write(offset: offset, value: UInt32(val & 0xFFFF_FFFF))
             } else {
                 let val = vm.uart.read(offset: offset)
-                try setReg(hv_reg_t(rawValue: UInt32(srt)), UInt64(val))
+                try writeSrt(UInt64(val))
             }
         } else if pa >= GIC_DIST_BASE && pa < GIC_DIST_BASE + 0x10000 {
             // GIC distributor — handled by Apple's hv_gic hardware emulation.
@@ -279,18 +292,18 @@ final class VCPU {
                 print("  GIC DIST \(rw) offset=0x\(String(pa - GIC_DIST_BASE, radix: 16)) at PC=0x\(String(pc, radix: 16))")
             }
             if !isWrite {
-                try setReg(hv_reg_t(rawValue: UInt32(srt)), 0)
+                try writeSrt(0)
             }
         } else if pa >= GIC_REDIST_BASE && pa < GIC_REDIST_BASE + 0x100000 {
             // GIC redistributor — handled by Apple's hv_gic hardware emulation.
             if !isWrite {
-                try setReg(hv_reg_t(rawValue: UInt32(srt)), 0)
+                try writeSrt(0)
             }
         } else if pa >= VIRTIO_BASE && pa < VIRTIO_BASE + VIRTIO_SIZE {
             // Virtio MMIO — dispatch to registered transports
             if let (transport, regOffset) = vm.virtioTransport(for: pa) {
                 if isWrite {
-                    let val = try getReg(hv_reg_t(rawValue: UInt32(srt)))
+                    let val = try readSrt()
                     transport.write(offset: regOffset, value: UInt32(val & 0xFFFF_FFFF))
 
                     // After QUEUE_NOTIFY or any write that may generate a response,
@@ -300,12 +313,12 @@ final class VCPU {
                     }
                 } else {
                     let val = transport.read(offset: regOffset)
-                    try setReg(hv_reg_t(rawValue: UInt32(srt)), UInt64(val))
+                    try writeSrt(UInt64(val))
                 }
             } else {
                 // No device at this slot — return 0 (device_id=0 means empty)
                 if !isWrite {
-                    try setReg(hv_reg_t(rawValue: UInt32(srt)), 0)
+                    try writeSrt(0)
                 }
             }
         } else {

@@ -640,8 +640,16 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let shouldCapture = captureNextFrame
                 || (captureAtFrame >= 0 && frameCount == captureAtFrame)
 
+            // Present and commit the main command buffer FIRST so the
+            // drawable texture contains the rendered content.
+            if let drawable = currentDrawable {
+                currentCommandBuffer?.present(drawable)
+            }
+            currentCommandBuffer?.commit()
+            currentCommandBuffer?.waitUntilCompleted()
+
+            // Capture AFTER the render commands have executed.
             if shouldCapture, let drawable = currentDrawable {
-                // Blit drawable to a CPU-readable staging texture before present.
                 let tex = drawable.texture
                 let desc = MTLTextureDescriptor.texture2DDescriptor(
                     pixelFormat: tex.pixelFormat,
@@ -666,11 +674,6 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 captureNextFrame = false
             }
 
-            if let drawable = currentDrawable {
-                currentCommandBuffer?.present(drawable)
-            }
-            currentCommandBuffer?.commit()
-            currentCommandBuffer?.waitUntilCompleted()
             frameCount += 1
             currentCommandBuffer = nil
             currentDrawable = nil

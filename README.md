@@ -50,6 +50,20 @@ make run KERNEL=path/to/kernel.elf
 
 The `com.apple.security.hypervisor` entitlement is applied automatically by `make sign`.
 
+### Hello Triangle Demo
+
+A self-contained bare-metal Rust example that renders a colored triangle with 4x MSAA:
+
+```sh
+cd examples/hello-triangle
+cargo build --release
+cd ../..
+make sign
+.build/debug/hypervisor examples/hello-triangle/target/aarch64-unknown-none/release/hello-triangle
+```
+
+The example is ~550 lines with zero dependencies — boots, initializes virtio, compiles MSL shaders, and draws a triangle via the Metal protocol. Read the source for a walkthrough of how to build a guest driver.
+
 ## Usage
 
 ```text
@@ -158,7 +172,7 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 
 ## Metal GPU Protocol
 
-The Metal passthrough protocol is a simple command stream over two virtqueues. See [`docs/metal-protocol.md`](docs/metal-protocol.md) for the full specification.
+The Metal passthrough protocol is a simple command stream over two virtqueues. See [`PROTOCOL.md`](PROTOCOL.md) for the full specification.
 
 ### Quick Overview
 

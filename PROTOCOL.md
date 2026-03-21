@@ -17,10 +17,10 @@ The protocol enables a guest kernel to issue Metal rendering commands without an
 
 The Metal GPU device uses virtio MMIO with **device ID 22** (custom).
 
-| Queue | Index | Purpose | Typical Usage |
-|---|---|---|---|
-| Setup | 0 | Object creation/destruction | Once at init, occasional texture uploads |
-| Render | 1 | Per-frame command buffers | Every frame |
+| Queue  | Index | Purpose                     | Typical Usage                            |
+| ------ | ----- | --------------------------- | ---------------------------------------- |
+| Setup  | 0     | Object creation/destruction | Once at init, occasional texture uploads |
+| Render | 1     | Per-frame command buffers   | Every frame                              |
 
 The guest writes one or more commands into a virtio descriptor chain. The host processes all commands in the chain sequentially, then marks the descriptor as used.
 
@@ -28,7 +28,7 @@ The guest writes one or more commands into a virtio descriptor chain. The host p
 
 Every command starts with an 8-byte header:
 
-```
+```text
 Offset  Size  Field
 0       u16   method_id      Command identifier
 2       u16   flags          Reserved (must be 0)
@@ -39,8 +39,8 @@ Commands are packed sequentially in the virtio buffer with no padding between th
 
 ## Special Handles
 
-| Handle | Value | Meaning |
-|---|---|---|
+| Handle            | Value        | Meaning                                                         |
+| ----------------- | ------------ | --------------------------------------------------------------- |
 | `DRAWABLE_HANDLE` | `0xFFFFFFFF` | When used as a texture, acquires the next CAMetalLayer drawable |
 
 ## Setup Commands (Queue 0)
@@ -49,7 +49,7 @@ Commands are packed sequentially in the virtio buffer with no padding between th
 
 Compile Metal Shading Language source into a library.
 
-```
+```text
 Payload:
   u32   library_handle     Guest-assigned handle for the compiled library
   u32   source_length      Length of MSL source in bytes
@@ -62,7 +62,7 @@ The host calls `MTLDevice.makeLibrary(source:)`. Compilation errors are logged b
 
 Get a named function from a compiled library.
 
-```
+```text
 Payload:
   u32   function_handle    Guest-assigned handle for the function
   u32   library_handle     Handle of the compiled library
@@ -74,7 +74,7 @@ Payload:
 
 Create a render pipeline state object.
 
-```
+```text
 Payload:
   u32   pipeline_handle       Guest-assigned handle
   u32   vertex_fn_handle      Handle of vertex function
@@ -87,11 +87,11 @@ Payload:
 
 **Vertex layout convention:** The default vertex descriptor is:
 
-| Attribute | Index | Format | Offset | Description |
-|---|---|---|---|---|
-| position | 0 | float2 | 0 | Clip-space position |
-| texCoord | 1 | float2 | 8 | Texture coordinates |
-| color | 2 | float4 | 16 | RGBA color |
+| Attribute | Index | Format | Offset | Description         |
+| --------- | ----- | ------ | ------ | ------------------- |
+| position  | 0     | float2 | 0      | Clip-space position |
+| texCoord  | 1     | float2 | 8      | Texture coordinates |
+| color     | 2     | float4 | 16     | RGBA color          |
 
 Stride: **32 bytes**, buffer index 0.
 
@@ -101,7 +101,7 @@ This layout is used for all render pipelines. Guest shaders must match this vert
 
 Create a compute pipeline state object.
 
-```
+```text
 Payload:
   u32   pipeline_handle    Guest-assigned handle
   u32   function_handle    Handle of compute function
@@ -111,7 +111,7 @@ Payload:
 
 Create a depth/stencil state object.
 
-```
+```text
 Payload:
   u32   state_handle       Guest-assigned handle
   u8    stencil_enabled    1 = enable stencil test
@@ -124,7 +124,7 @@ Payload:
 
 Create a sampler state object.
 
-```
+```text
 Payload:
   u32   sampler_handle     Guest-assigned handle
   u8    min_filter         0 = nearest, 1 = linear
@@ -139,7 +139,7 @@ Address modes: 0 = clampToEdge, 1 = repeat, 2 = mirrorRepeat, 3 = clampToZero.
 
 Create a texture object.
 
-```
+```text
 Payload:
   u32   texture_handle     Guest-assigned handle
   u16   width              Width in pixels
@@ -154,7 +154,7 @@ Payload:
 
 Upload pixel data to a region of a texture.
 
-```
+```text
 Payload:
   u32   texture_handle     Target texture handle
   u16   x                  Destination X offset
@@ -169,7 +169,7 @@ Payload:
 
 Destroy any previously created object.
 
-```
+```text
 Payload:
   u32   handle             Handle of the object to destroy
 ```
@@ -184,7 +184,7 @@ The host removes the handle from all object tables (libraries, functions, pipeli
 
 Begin a new render pass.
 
-```
+```text
 Payload:
   u32   color_texture      Color attachment handle (DRAWABLE_HANDLE for screen)
   u32   resolve_texture    MSAA resolve target (DRAWABLE_HANDLE or 0 for none)
@@ -203,7 +203,7 @@ Payload:
 
 End the current render pass encoder.
 
-```
+```text
 Payload: (none)
 ```
 
@@ -211,28 +211,28 @@ Payload: (none)
 
 #### `SET_RENDER_PIPELINE` (0x0110)
 
-```
+```text
 Payload:
   u32   pipeline_handle
 ```
 
 #### `SET_DEPTH_STENCIL_STATE` (0x0111)
 
-```
+```text
 Payload:
   u32   state_handle
 ```
 
 #### `SET_STENCIL_REF` (0x0112)
 
-```
+```text
 Payload:
   u32   value              Stencil reference value
 ```
 
 #### `SET_SCISSOR` (0x0113)
 
-```
+```text
 Payload:
   u16   x
   u16   y
@@ -246,7 +246,7 @@ Payload:
 
 Set inline vertex data (up to 4 KB per Metal call).
 
-```
+```text
 Payload:
   u8    buffer_index       Metal buffer index (typically 0 for vertices, 1 for uniforms)
   u8    pad
@@ -259,7 +259,7 @@ Payload:
 
 Bind a texture to a fragment shader slot.
 
-```
+```text
 Payload:
   u32   texture_handle
   u8    index              Fragment texture index
@@ -271,7 +271,7 @@ Payload:
 
 Bind a sampler to a fragment shader slot.
 
-```
+```text
 Payload:
   u32   sampler_handle
   u8    index              Fragment sampler index
@@ -283,7 +283,7 @@ Payload:
 
 Set inline fragment shader uniform data.
 
-```
+```text
 Payload:
   u8    index              Metal buffer index
   u8    pad
@@ -296,7 +296,7 @@ Payload:
 
 #### `DRAW_PRIMITIVES` (0x0130)
 
-```
+```text
 Payload:
   u8    primitive_type     Primitive type (see enum below)
   u8    pad
@@ -309,26 +309,26 @@ Payload:
 
 #### `BEGIN_COMPUTE_PASS` (0x0200)
 
-```
+```text
 Payload: (none)
 ```
 
 #### `END_COMPUTE_PASS` (0x0201)
 
-```
+```text
 Payload: (none)
 ```
 
 #### `SET_COMPUTE_PIPELINE` (0x0210)
 
-```
+```text
 Payload:
   u32   pipeline_handle
 ```
 
 #### `SET_COMPUTE_TEXTURE` (0x0211)
 
-```
+```text
 Payload:
   u32   texture_handle
   u8    index
@@ -338,7 +338,7 @@ Payload:
 
 #### `SET_COMPUTE_BYTES` (0x0212)
 
-```
+```text
 Payload:
   u8    buffer_index
   u8    pad
@@ -349,7 +349,7 @@ Payload:
 
 #### `DISPATCH_THREADS` (0x0220)
 
-```
+```text
 Payload:
   u16   grid_x             Grid size X
   u16   grid_y             Grid size Y
@@ -363,13 +363,13 @@ Payload:
 
 #### `BEGIN_BLIT_PASS` (0x0300)
 
-```
+```text
 Payload: (none)
 ```
 
 #### `END_BLIT_PASS` (0x0301)
 
-```
+```text
 Payload: (none)
 ```
 
@@ -377,7 +377,7 @@ Payload: (none)
 
 Copy a rectangular region between textures.
 
-```
+```text
 Payload:
   u32   src_texture
   u32   dst_texture
@@ -397,7 +397,7 @@ Payload:
 
 Present the drawable and commit the command buffer. This ends the frame.
 
-```
+```text
 Payload: (none)
 ```
 
@@ -408,74 +408,76 @@ The host presents the CAMetalLayer drawable (if one was acquired via `DRAWABLE_H
 ### Pixel Format
 
 | Wire Value | Metal Equivalent |
-|---|---|
-| 1 | `.bgra8Unorm` |
-| 2 | `.rgba8Unorm` |
-| 3 | `.r8Unorm` |
-| 4 | `.stencil8` |
-| 5 | `.rgba16Float` |
+| ---------- | ---------------- |
+| 1          | `.bgra8Unorm`    |
+| 2          | `.rgba8Unorm`    |
+| 3          | `.r8Unorm`       |
+| 4          | `.stencil8`      |
+| 5          | `.rgba16Float`   |
 
 ### Primitive Type
 
 | Wire Value | Metal Equivalent |
-|---|---|
-| 0 | `.triangle` |
-| 1 | `.triangleStrip` |
-| 2 | `.line` |
-| 3 | `.point` |
+| ---------- | ---------------- |
+| 0          | `.triangle`      |
+| 1          | `.triangleStrip` |
+| 2          | `.line`          |
+| 3          | `.point`         |
 
 ### Load Action
 
 | Wire Value | Metal Equivalent |
-|---|---|
-| 0 | `.dontCare` |
-| 1 | `.load` |
-| 2 | `.clear` |
+| ---------- | ---------------- |
+| 0          | `.dontCare`      |
+| 1          | `.load`          |
+| 2          | `.clear`         |
 
 ### Store Action
 
-| Wire Value | Metal Equivalent |
-|---|---|
-| 0 | `.dontCare` |
-| 1 | `.store` |
-| 2 | `.multisampleResolve` |
+| Wire Value | Metal Equivalent      |
+| ---------- | --------------------- |
+| 0          | `.dontCare`           |
+| 1          | `.store`              |
+| 2          | `.multisampleResolve` |
 
 ### Compare Function (Stencil)
 
 | Wire Value | Metal Equivalent |
-|---|---|
-| 0 | `.never` |
-| 1 | `.always` |
-| 2 | `.equal` |
-| 3 | `.notEqual` |
-| 4 | `.less` |
-| 5 | `.lessEqual` |
-| 6 | `.greater` |
-| 7 | `.greaterEqual` |
+| ---------- | ---------------- |
+| 0          | `.never`         |
+| 1          | `.always`        |
+| 2          | `.equal`         |
+| 3          | `.notEqual`      |
+| 4          | `.less`          |
+| 5          | `.lessEqual`     |
+| 6          | `.greater`       |
+| 7          | `.greaterEqual`  |
 
 ### Stencil Operation
 
-| Wire Value | Metal Equivalent |
-|---|---|
-| 0 | `.keep` |
-| 1 | `.zero` |
-| 2 | `.replace` |
-| 3 | `.incrementClamp` |
-| 4 | `.decrementClamp` |
-| 5 | `.invert` |
-| 6 | `.incrementWrap` |
-| 7 | `.decrementWrap` |
+| Wire Value | Metal Equivalent  |
+| ---------- | ----------------- |
+| 0          | `.keep`           |
+| 1          | `.zero`           |
+| 2          | `.replace`        |
+| 3          | `.incrementClamp` |
+| 4          | `.decrementClamp` |
+| 5          | `.invert`         |
+| 6          | `.incrementWrap`  |
+| 7          | `.decrementWrap`  |
 
 ## Minimal Example: Rendering a Triangle
 
 A guest driver that draws a single colored triangle needs:
 
 **Setup (once):**
+
 1. `COMPILE_LIBRARY` — compile an MSL shader with vertex/fragment functions
 2. `GET_FUNCTION` — get `"vertex_main"` and `"fragment_main"`
 3. `CREATE_RENDER_PIPELINE` — vertex + fragment, blend off, sample_count=1
 
 **Per frame:**
+
 1. `BEGIN_RENDER_PASS` — color=`DRAWABLE_HANDLE`, load=clear, store=store
 2. `SET_RENDER_PIPELINE` — bind the pipeline
 3. `SET_VERTEX_BYTES` — 3 vertices × 32 bytes = 96 bytes of vertex data
@@ -511,7 +513,7 @@ fragment float4 fragment_main(VertexOut in [[stage_in]]) {
 
 **Vertex data (clip space, 32 bytes each):**
 
-```
+```text
 // position (f32×2), texCoord (f32×2), color (f32×4)
 {  0.0,  0.5,   0.0, 0.0,   1.0, 0.0, 0.0, 1.0 }  // top, red
 { -0.5, -0.5,   0.0, 0.0,   0.0, 1.0, 0.0, 1.0 }  // bottom-left, green
