@@ -31,7 +31,18 @@ run-serial: sign
 	fi
 	$(BINARY) $(KERNEL) --no-gpu $(ARGS)
 
+PREFIX ?= $(HOME)/.local
+
+install: sign
+	@mkdir -p $(PREFIX)/bin
+	cp $(BINARY) $(PREFIX)/bin/hypervisor
+	codesign --entitlements $(ENTITLEMENTS) --force -s - $(PREFIX)/bin/hypervisor
+	@echo "Installed to $(PREFIX)/bin/hypervisor"
+
+uninstall:
+	rm -f $(PREFIX)/bin/hypervisor
+
 clean:
 	swift package clean
 
-.PHONY: build sign run run-verbose run-serial clean
+.PHONY: build sign run run-verbose run-serial install uninstall clean
