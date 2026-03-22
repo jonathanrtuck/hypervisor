@@ -48,7 +48,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
     // Frame capture state
     private(set) var frameCount: Int = 0
-    var captureAtFrame: Int = -1       // -1 = disabled
+    var captureFrames: Set<Int> = []    // empty = disabled
     var capturePath: String = "/tmp/hypervisor-capture.png"
     var captureNextFrame: Bool = false  // triggered by SIGUSR1
     var exitAfterCapture: Bool = false
@@ -643,7 +643,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 captureNextFrame = true
             }
             let shouldCapture = captureNextFrame
-                || (captureAtFrame >= 0 && frameCount == captureAtFrame)
+                || captureFrames.contains(frameCount)
 
             // Present and commit the main command buffer FIRST so the
             // drawable texture contains the rendered content.
@@ -673,8 +673,18 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                     blit.endEncoding()
                     cb.commit()
                     cb.waitUntilCompleted()
-                    saveTextureAsPNG(staging, path: capturePath)
-                    print("VirtioMetal: captured frame \(frameCount) → \(capturePath)")
+
+                    // Multi-frame: suffix path with frame number (e.g., prefix-030.png).
+                    // Single-frame: use path as-is for backward compatibility.
+                    let outPath: String
+                    if captureFrames.count > 1 {
+                        let base = (capturePath as NSString).deletingPathExtension
+                        outPath = "\(base)-\(String(format: "%03d", frameCount)).png"
+                    } else {
+                        outPath = capturePath
+                    }
+                    saveTextureAsPNG(staging, path: outPath)
+                    print("VirtioMetal: captured frame \(frameCount) → \(outPath)")
                 }
                 captureNextFrame = false
             }
@@ -683,8 +693,12 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             currentCommandBuffer = nil
             currentDrawable = nil
 
+            // Exit after the last requested capture frame.
             if shouldCapture && exitAfterCapture {
-                exit(0)
+                let maxFrame = captureFrames.max() ?? -1
+                if frameCount > maxFrame {
+                    exit(0)
+                }
             }
         }
     }

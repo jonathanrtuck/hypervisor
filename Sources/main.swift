@@ -29,7 +29,7 @@ struct Config {
     let ramMiB: Int
     let cpuCount: Int
     let shareDir: String?
-    let captureFrame: Int
+    let captureFrames: Set<Int>
     let capturePath: String
 
     var ramSize: Int { ramMiB * 1024 * 1024 }
@@ -50,6 +50,7 @@ func printUsage() {
     print("  --cpus N             Number of vCPUs (default: 4)")
     print("  --share DIR          9P shared directory (auto-detected if omitted)")
     print("  --capture N PATH     Capture frame N as PNG to PATH, then exit")
+    print("  --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png")
     print("")
     print("Signals:")
     print("  SIGUSR1              Capture next frame to /tmp/hypervisor-capture.png")
@@ -70,7 +71,7 @@ func parseArgs() -> Config {
     var ramMiB = 256
     var cpuCount = 4
     var shareDir: String?
-    var captureFrame = -1
+    var captureFrames: Set<Int> = []
     var capturePath = "/tmp/hypervisor-capture.png"
 
     var i = 1
@@ -106,11 +107,25 @@ func parseArgs() -> Config {
             shareDir = args[i + 1]
             i += 1
         case "--capture":
-            guard i + 2 < args.count, let n = Int(args[i + 1]) else {
-                print("Error: --capture requires N PATH")
+            guard i + 2 < args.count else {
+                print("Error: --capture requires FRAMES PATH")
                 exit(1)
             }
-            captureFrame = n
+            let spec = args[i + 1]
+            let parts = spec.split(separator: ",")
+            var frames: Set<Int> = []
+            for part in parts {
+                guard let n = Int(part) else {
+                    print("Error: --capture frame numbers must be integers, got '\(part)'")
+                    exit(1)
+                }
+                frames.insert(n)
+            }
+            guard !frames.isEmpty else {
+                print("Error: --capture requires at least one frame number")
+                exit(1)
+            }
+            captureFrames = frames
             capturePath = args[i + 2]
             i += 2
         case "--help", "-h":
@@ -148,7 +163,7 @@ func parseArgs() -> Config {
         ramMiB: ramMiB,
         cpuCount: cpuCount,
         shareDir: shareDir,
-        captureFrame: captureFrame,
+        captureFrames: captureFrames,
         capturePath: capturePath
     )
 }
@@ -241,9 +256,9 @@ func main() throws {
 
         let backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
         backend.verbose = config.verbose
-        backend.captureAtFrame = config.captureFrame
+        backend.captureFrames = config.captureFrames
         backend.capturePath = config.capturePath
-        backend.exitAfterCapture = config.captureFrame >= 0
+        backend.exitAfterCapture = !config.captureFrames.isEmpty
         vm.addVirtioDevice(slot: 3, backend: backend)
         print("  GPU: Metal passthrough (slot 3)")
 
