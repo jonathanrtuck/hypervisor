@@ -24,6 +24,8 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Hardware GIC** — Apple Silicon's native GICv3, not software emulation
 - **Virtio devices** — 9P filesystem, keyboard, tablet (absolute pointer), Metal GPU
 - **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
+- **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names
+- **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
 - **ELF loader** — loads standard ELF64 binaries, handles VA→PA entry point resolution
 - **Device tree** — generates FDT with memory, UART, GIC, PSCI, CPU, and virtio nodes
 
@@ -78,6 +80,8 @@ Options:
   --share DIR          9P shared directory (auto-detected if omitted)
   --capture N PATH     Capture frame N as PNG to PATH, then exit
   --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png, exit after last
+  --events FILE        Run event script (evdev input injection + captures)
+  --resolution WxH     Fixed pixel resolution (e.g., 800x600)
 
 Signals:
   SIGUSR1              Capture next frame to /tmp/hypervisor-capture.png
@@ -104,6 +108,32 @@ Signals:
 # Capture frames 10, 30, 60 in a single boot (for animation verification)
 .build/debug/hypervisor kernel.elf --capture 10,30,60 /tmp/anim.png
 # Produces /tmp/anim-010.png, /tmp/anim-030.png, /tmp/anim-060.png
+
+# Run an event script (type text, edit, capture result)
+cat > /tmp/test.events << 'SCRIPT'
+type hello world
+key backspace
+wait 5
+capture /tmp/result.png
+SCRIPT
+.build/debug/hypervisor kernel.elf --events /tmp/test.events
+
+# Fixed resolution for deterministic display dimensions
+.build/debug/hypervisor kernel.elf --resolution 800x600 --events /tmp/test.events
+```
+
+### Event Script Format
+
+Event scripts use standard Linux evdev key names (`linux/input-event-codes.h`). One action per line, `#` comments, blank lines ignored.
+
+```text
+type hello world          # Type each character (handles shift for uppercase)
+key backspace             # Single key press
+key shift+left            # Modified key (modifiers: shift, ctrl, alt, cmd)
+click 100 200             # Left click at (x, y) in points
+dblclick 100 200          # Double click
+wait 10                   # Wait 10 extra frames
+capture /tmp/result.png   # Screenshot at this point
 ```
 
 ## Architecture
@@ -148,6 +178,7 @@ Signals:
 | `VirtioInput.swift`     | Keyboard and tablet input devices                        |
 | `VirtioMetal.swift`     | Metal command passthrough (deserialize + replay)         |
 | `MetalProtocol.swift`   | Metal command wire format definitions                    |
+| `EventScript.swift`     | Event script parser + scheduler (evdev key names)        |
 | `AppWindow.swift`       | NSWindow + CAMetalLayer + macOS input forwarding         |
 
 ### Threading Model
