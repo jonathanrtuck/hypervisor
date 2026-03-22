@@ -31,6 +31,8 @@ struct Config {
     let shareDir: String?
     let captureFrames: Set<Int>
     let capturePath: String
+    let eventsFile: String?
+    let resolution: (Int, Int)?
 
     var ramSize: Int { ramMiB * 1024 * 1024 }
     let ramBase: UInt64 = 0x4000_0000
@@ -51,6 +53,8 @@ func printUsage() {
     print("  --share DIR          9P shared directory (auto-detected if omitted)")
     print("  --capture N PATH     Capture frame N as PNG to PATH, then exit")
     print("  --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png")
+    print("  --events FILE        Run event script (evdev input injection + captures)")
+    print("  --resolution WxH     Fixed pixel resolution (e.g., 800x600)")
     print("")
     print("Signals:")
     print("  SIGUSR1              Capture next frame to /tmp/hypervisor-capture.png")
@@ -73,6 +77,8 @@ func parseArgs() -> Config {
     var shareDir: String?
     var captureFrames: Set<Int> = []
     var capturePath = "/tmp/hypervisor-capture.png"
+    var eventsFile: String?
+    var resolution: (Int, Int)?
 
     var i = 1
     while i < args.count {
@@ -128,6 +134,26 @@ func parseArgs() -> Config {
             captureFrames = frames
             capturePath = args[i + 2]
             i += 2
+        case "--events":
+            guard i + 1 < args.count else {
+                print("Error: --events requires a file path")
+                exit(1)
+            }
+            eventsFile = args[i + 1]
+            i += 1
+        case "--resolution":
+            guard i + 1 < args.count else {
+                print("Error: --resolution requires WxH (e.g., 800x600)")
+                exit(1)
+            }
+            let parts = args[i + 1].lowercased().split(separator: "x")
+            guard parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]),
+                  w > 0, h > 0 else {
+                print("Error: --resolution format is WxH (e.g., 800x600)")
+                exit(1)
+            }
+            resolution = (w, h)
+            i += 1
         case "--help", "-h":
             printUsage()
             exit(0)
@@ -164,7 +190,9 @@ func parseArgs() -> Config {
         cpuCount: cpuCount,
         shareDir: shareDir,
         captureFrames: captureFrames,
-        capturePath: capturePath
+        capturePath: capturePath,
+        eventsFile: eventsFile,
+        resolution: resolution
     )
 }
 
@@ -251,7 +279,7 @@ func main() throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
 
-        let window = AppWindow(windowed: config.windowed)
+        let window = AppWindow(windowed: config.windowed, resolution: config.resolution)
         appWindow = window
 
         let backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
@@ -261,6 +289,65 @@ func main() throws {
         backend.exitAfterCapture = !config.captureFrames.isEmpty
         vm.addVirtioDevice(slot: 3, backend: backend)
         print("  GPU: Metal passthrough (slot 3)")
+
+        // ── Event script ──────────────────────────────────────────────
+        if let eventsPath = config.eventsFile {
+            guard let actions = loadEventScript(path: eventsPath) else { exit(1) }
+            let schedule = EventSchedule.build(actions: actions)
+            print("  Events: \(eventsPath) (\(actions.count) actions, through frame \(schedule.maxFrame))")
+
+            // Merge script captures into VirtioMetal capture state.
+            for frame in 0...schedule.maxFrame + 10 {
+                for action in schedule.actionsForFrame(frame) {
+                    if case .capture(let path) = action {
+                        backend.captureFrames.insert(frame)
+                        backend.capturePath = path
+                        backend.exitAfterCapture = true
+                    }
+                }
+            }
+
+            // Wire onFrame callback: inject keyboard/tablet events at scheduled frames.
+            let viewSize = window.metalLayer.bounds.size
+            backend.onFrame = { [weak vm] frame in
+                guard let vm = vm else { return }
+                let events = schedule.actionsForFrame(frame)
+                if events.isEmpty { return }
+
+                guard let kbTransport = vm.virtioDevices[1],
+                      let tabTransport = vm.virtioDevices[2] else { return }
+                let kb = kbTransport.backend as! VirtioInputBackend
+                let tab = tabTransport.backend as! VirtioInputBackend
+
+                for action in events {
+                    switch action {
+                    case .keyboard(let type, let code, let value):
+                        kb.injectEvent(type: type, code: code, value: value,
+                                       state: kbTransport.currentQueueState(queue: 0), vm: vm)
+                    case .pointer(let x, let y):
+                        let absX = UInt32(max(0, min(32767, x / Float(viewSize.width) * 32767)))
+                        let absY = UInt32(max(0, min(32767, y / Float(viewSize.height) * 32767)))
+                        tab.injectEvent(type: 3, code: 0, value: absX,
+                                        state: tabTransport.currentQueueState(queue: 0), vm: vm)
+                        tab.injectEvent(type: 3, code: 1, value: absY,
+                                        state: tabTransport.currentQueueState(queue: 0), vm: vm)
+                    case .button(let code, let value):
+                        tab.injectEvent(type: 1, code: code, value: value,
+                                        state: tabTransport.currentQueueState(queue: 0), vm: vm)
+                    case .tabletSync:
+                        tab.injectEvent(type: 0, code: 0, value: 0,
+                                        state: tabTransport.currentQueueState(queue: 0), vm: vm)
+                    case .capture:
+                        break // Handled via captureFrames above
+                    }
+                }
+            }
+
+            // Exit after last scripted frame if no --capture was also specified.
+            if config.captureFrames.isEmpty && !schedule.isEmpty {
+                backend.exitAfterCapture = true
+            }
+        }
 
         // SIGUSR1 triggers ad-hoc screenshot capture.
         signal(SIGUSR1) { _ in

@@ -44,9 +44,9 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var onKeyboardEvent: KeyboardEventCallback?
     var onTabletEvent: TabletEventCallback?
 
-    init(windowed: Bool = false) {
+    init(windowed: Bool = false, resolution: (Int, Int)? = nil) {
         self.windowed = windowed
-        self.pendingFullscreen = !windowed
+        self.pendingFullscreen = !windowed && resolution == nil
 
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this system")
@@ -54,25 +54,43 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.metalDevice = device
         self.commandQueue = device.makeCommandQueue()!
 
-        // Detect native screen resolution in physical pixels.
+        // Determine display resolution.
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let scaleFactor = screen.backingScaleFactor
         let screenFrame = screen.frame
-        let nativeWidth = Int(screenFrame.width * scaleFactor)
-        let nativeHeight = Int(screenFrame.height * scaleFactor)
-        self.displayWidth = nativeWidth
-        self.displayHeight = nativeHeight
+
+        let pixelWidth: Int
+        let pixelHeight: Int
+        let windowWidth: Int
+        let windowHeight: Int
+
+        if let (w, h) = resolution {
+            // Fixed resolution: pixel dimensions specified, window sized to fit
+            pixelWidth = w
+            pixelHeight = h
+            windowWidth = Int(CGFloat(w) / scaleFactor)
+            windowHeight = Int(CGFloat(h) / scaleFactor)
+        } else {
+            // Native resolution: full screen size
+            pixelWidth = Int(screenFrame.width * scaleFactor)
+            pixelHeight = Int(screenFrame.height * scaleFactor)
+            windowWidth = Int(screenFrame.width)
+            windowHeight = Int(screenFrame.height)
+        }
+
+        self.displayWidth = pixelWidth
+        self.displayHeight = pixelHeight
 
         // Create Metal layer
         let layer = CAMetalLayer()
         layer.device = device
         layer.pixelFormat = .bgra8Unorm_srgb
         layer.framebufferOnly = false
-        layer.drawableSize = CGSize(width: nativeWidth, height: nativeHeight)
+        layer.drawableSize = CGSize(width: pixelWidth, height: pixelHeight)
         self.metalLayer = layer
 
-        // Create content view (window starts at screen size, will go fullscreen)
-        let frame = NSRect(x: 0, y: 0, width: Int(screenFrame.width), height: Int(screenFrame.height))
+        // Create content view
+        let frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
         self.contentView = MetalView(frame: frame)
         self.contentView.wantsLayer = true
 

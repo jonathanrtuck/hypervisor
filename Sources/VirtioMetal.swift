@@ -53,6 +53,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     var captureNextFrame: Bool = false  // triggered by SIGUSR1
     var exitAfterCapture: Bool = false
 
+    /// Called after each frame with the new frame count.
+    /// Used by the event script system to inject input at specific frames.
+    var onFrame: ((Int) -> Void)?
+
     // Metal state
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -690,6 +694,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             }
 
             frameCount += 1
+
+            // Notify event script system (injects scheduled input events).
+            onFrame?(frameCount)
+
             currentCommandBuffer = nil
             currentDrawable = nil
 
