@@ -414,6 +414,7 @@ The host presents the CAMetalLayer drawable (if one was acquired via `DRAWABLE_H
 | 3          | `.r8Unorm`       |
 | 4          | `.stencil8`      |
 | 5          | `.rgba16Float`   |
+| 6          | `.bgra8Unorm_srgb` |
 
 ### Primitive Type
 

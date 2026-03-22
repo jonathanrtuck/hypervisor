@@ -276,7 +276,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             desc.vertexFunction = vfn
             desc.fragmentFunction = ffn
             desc.vertexDescriptor = vertexDescriptor
-            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
             desc.rasterSampleCount = max(1, Int(sampleCnt))
 
             if stencilFmt != 0 {
@@ -716,12 +716,13 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
     private func mapPixelFormat(_ wire: UInt8) -> MTLPixelFormat {
         switch MetalPixelFormatWire(rawValue: wire) {
-        case .bgra8Unorm:  return .bgra8Unorm
-        case .rgba8Unorm:  return .rgba8Unorm
-        case .r8Unorm:     return .r8Unorm
-        case .stencil8:    return .stencil8
-        case .rgba16Float: return .rgba16Float
-        case .none:        return .bgra8Unorm
+        case .bgra8Unorm:     return .bgra8Unorm
+        case .rgba8Unorm:     return .rgba8Unorm
+        case .r8Unorm:        return .r8Unorm
+        case .stencil8:       return .stencil8
+        case .rgba16Float:    return .rgba16Float
+        case .bgra8UnormSrgb: return .bgra8Unorm_srgb
+        case .none:           return .bgra8Unorm
         }
     }
 

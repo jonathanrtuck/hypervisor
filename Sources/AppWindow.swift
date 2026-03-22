@@ -66,7 +66,7 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Create Metal layer
         let layer = CAMetalLayer()
         layer.device = device
-        layer.pixelFormat = .bgra8Unorm
+        layer.pixelFormat = .bgra8Unorm_srgb
         layer.framebufferOnly = false
         layer.drawableSize = CGSize(width: nativeWidth, height: nativeHeight)
         self.metalLayer = layer

@@ -200,6 +200,7 @@ enum MetalPixelFormatWire: UInt8 {
     case r8Unorm    = 3
     case stencil8   = 4
     case rgba16Float = 5
+    case bgra8UnormSrgb = 6
 }
 
 // MARK: - Primitive type mapping
