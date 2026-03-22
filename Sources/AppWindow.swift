@@ -168,8 +168,12 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
         if !windowed {
-            // Enter fullscreen after app is ready (matches QEMU's full-screen=on behavior).
-            window.toggleFullScreen(nil)
+            // Enter fullscreen after the run loop has fully started. Dispatching
+            // async ensures the window is on-screen before the transition begins
+            // (toggleFullScreen is a no-op if the window isn't ready).
+            DispatchQueue.main.async {
+                self.window.toggleFullScreen(nil)
+            }
         }
     }
 
