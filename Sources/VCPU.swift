@@ -22,6 +22,8 @@ let PSCI_VERSION: UInt64    = 0x8400_0000
 /// Well-known MMIO ranges
 let UART_BASE: UInt64     = 0x0900_0000
 let UART_SIZE: UInt64     = 0x1000
+let PL031_BASE: UInt64    = 0x0901_0000
+let PL031_SIZE: UInt64    = 0x1000
 let GIC_DIST_BASE: UInt64 = 0x0800_0000
 let GIC_REDIST_BASE: UInt64 = 0x080A_0000
 let VIRTIO_BASE: UInt64   = 0x0A00_0000
@@ -283,6 +285,26 @@ final class VCPU {
             } else {
                 let val = vm.uart.read(offset: offset)
                 try writeSrt(UInt64(val))
+            }
+        } else if pa >= PL031_BASE && pa < PL031_BASE + PL031_SIZE {
+            // PL031 RTC — read-only, returns host wall-clock time.
+            // Offset 0x000 (RTCDR): current time as Unix epoch seconds.
+            // All other offsets return 0 (we don't emulate match/load/control).
+            //
+            // Like QEMU's `-rtc base=localtime`, we add the local timezone
+            // offset so the guest's naive `epoch % 86400` math yields local
+            // hours/minutes/seconds rather than UTC.
+            if !isWrite {
+                let offset = pa - PL031_BASE
+                if offset == 0 {
+                    var now = time(nil)
+                    var local = tm()
+                    localtime_r(&now, &local)
+                    let localEpoch = now + local.tm_gmtoff
+                    try writeSrt(UInt64(UInt32(truncatingIfNeeded: localEpoch)))
+                } else {
+                    try writeSrt(0)
+                }
             }
         } else if pa >= GIC_DIST_BASE && pa < GIC_DIST_BASE + 0x10000 {
             // GIC distributor — handled by Apple's hv_gic hardware emulation.

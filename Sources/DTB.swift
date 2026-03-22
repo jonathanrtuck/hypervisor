@@ -49,6 +49,15 @@ enum DTB {
         b.prop_u32("clock-names-hack", 0)  // Kernel doesn't need clocks
         b.endNode()
 
+        // PL031 RTC node — provides wall-clock time from the host.
+        // The kernel probes for "arm,pl031" in the DTB and passes the
+        // MMIO address to core, which reads offset 0x000 (RTCDR) for
+        // epoch seconds.
+        b.beginNode("pl031@9010000")
+        b.prop_string("compatible", "arm,pl031\0arm,primecell")
+        b.prop_reg(0x0901_0000, 0x1000)
+        b.endNode()
+
         // Chosen node (tells kernel where stdout is)
         b.beginNode("chosen")
         b.prop_string("stdout-path", "/pl011@9000000")
