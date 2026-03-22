@@ -107,10 +107,10 @@ Signals:
 ┌─────────────────────────────────────────────────────┐
 │  macOS Host                                         │
 │                                                     │
-│  ┌─────────┐  ┌──────────┐  ┌───────────────────┐   │
-│  │ AppKit  │  │ Hyperv.  │  │ Metal             │   │
-│  │ Window  │  │ framework│  │ (GPU passthrough) │   │
-│  └────┬────┘  └────┬─────┘  └────────┬──────────┘   │
+│  ┌─────────┐  ┌───────────┐  ┌───────────────────┐  │
+│  │ AppKit  │  │ Hyperv.   │  │ Metal             │  │
+│  │ Window  │  │ framework │  │ (GPU passthrough) │  │
+│  └────┬────┘  └────┬──────┘  └────────┬──────────┘  │
 │       │            │                  │             │
 │  ┌────┴────────────┴──────────────────┴──────────┐  │
 │  │              Hypervisor App                   │  │
@@ -193,10 +193,10 @@ These are not yet implemented. Slot assignments and details may change.
 
 **virtio-sound** (device ID 25) — Audio playback and capture via CoreAudio. Two virtqueues: TX for playback, RX for capture. The guest negotiates PCM stream parameters (sample rate, channels, format) via virtio-sound's standard config space. The host backend creates a CoreAudio audio unit and bridges PCM buffers. Needed for audio/video content types.
 
-**Networking** — Two options under consideration:
+**Networking** — Options include:
 
 - _virtio-net_ (device ID 1): Standard NIC. The guest needs a TCP/IP stack. The host bridges via `Network.framework` (userspace packet injection) or a `utun` device.
-- _HTTP bridge_ (custom device): A higher-level alternative that exposes HTTP request/response and WebSocket semantics directly over virtio. The guest sends structured HTTP requests; the host executes them via `URLSession`. Avoids the guest needing a full TCP/IP stack at the cost of not supporting arbitrary protocols. Better fit for a document-centric OS that primarily needs web, email, and messaging.
+- _HTTP bridge_ (custom device): A higher-level alternative that exposes HTTP request/response and WebSocket semantics directly over virtio. The guest sends structured HTTP requests; the host executes them via `URLSession`. Avoids the guest needing a full TCP/IP stack at the cost of not supporting arbitrary protocols.
 
 **Clipboard bridge** — Copy/paste between host and guest. Either a custom virtio device or an extension of virtio-input. The host side reads and writes `NSPasteboard`. The guest side exposes a simple get/put interface for the OS clipboard abstraction.
 
@@ -256,7 +256,7 @@ Only Apple system frameworks — no external dependencies:
 
 ## Origin
 
-This was built for [a document-centric OS project](https://github.com/jonathanrtuck/os) exploring an alternative operating system where files are first-class citizens. We needed GPU-accelerated rendering for the guest OS but found QEMU's virgl path on macOS required four translation layers (virglrenderer → ANGLE → MoltenVK → Metal) — slow, fragile, and hard to debug. So we built a native hypervisor that passes Metal commands straight through, and extracted it here for anyone with the same problem.
+This was built for [a document-centric OS project](https://github.com/jonathanrtuck/os) exploring an operating system design where mimetypes are first-class. We needed GPU-accelerated rendering for the guest OS but found QEMU's virgl path on macOS required four translation layers (virglrenderer → ANGLE → MoltenVK → Metal) — slow, fragile, and hard to debug. So we built a native hypervisor that passes Metal commands straight through, and extracted it here for anyone with the same problem.
 
 ## License
 
