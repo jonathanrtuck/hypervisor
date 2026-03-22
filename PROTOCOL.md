@@ -407,13 +407,13 @@ The host presents the CAMetalLayer drawable (if one was acquired via `DRAWABLE_H
 
 ### Pixel Format
 
-| Wire Value | Metal Equivalent |
-| ---------- | ---------------- |
-| 1          | `.bgra8Unorm`    |
-| 2          | `.rgba8Unorm`    |
-| 3          | `.r8Unorm`       |
-| 4          | `.stencil8`      |
-| 5          | `.rgba16Float`   |
+| Wire Value | Metal Equivalent   |
+| ---------- | ------------------ |
+| 1          | `.bgra8Unorm`      |
+| 2          | `.rgba8Unorm`      |
+| 3          | `.r8Unorm`         |
+| 4          | `.stencil8`        |
+| 5          | `.rgba16Float`     |
 | 6          | `.bgra8Unorm_srgb` |
 
 ### Primitive Type
