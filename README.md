@@ -23,7 +23,7 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Multi-core SMP** — hardware-backed vCPUs via Hypervisor.framework with PSCI CPU_ON
 - **Hardware GIC** — Apple Silicon's native GICv3, not software emulation
 - **Virtio devices** — 9P filesystem, keyboard, tablet (absolute pointer), Metal GPU
-- **Built-in screenshot** — `--capture N path.png` or `SIGUSR1` for ad-hoc capture
+- **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
 - **ELF loader** — loads standard ELF64 binaries, handles VA→PA entry point resolution
 - **Device tree** — generates FDT with memory, UART, GIC, PSCI, CPU, and virtio nodes
 
@@ -77,6 +77,7 @@ Options:
   --cpus N             Number of vCPUs (default: 4)
   --share DIR          9P shared directory (auto-detected if omitted)
   --capture N PATH     Capture frame N as PNG to PATH, then exit
+  --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png, exit after last
 
 Signals:
   SIGUSR1              Capture next frame to /tmp/hypervisor-capture.png
@@ -99,6 +100,10 @@ Signals:
 
 # Capture frame 5 as a screenshot, then exit
 .build/debug/hypervisor kernel.elf --capture 5 /tmp/screenshot.png
+
+# Capture frames 10, 30, 60 in a single boot (for animation verification)
+.build/debug/hypervisor kernel.elf --capture 10,30,60 /tmp/anim.png
+# Produces /tmp/anim-010.png, /tmp/anim-030.png, /tmp/anim-060.png
 ```
 
 ## Architecture
