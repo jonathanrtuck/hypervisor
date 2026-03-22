@@ -277,6 +277,7 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
             (.shift, 42),     // KEY_LEFTSHIFT
             (.option, 56),    // KEY_LEFTALT
             (.command, 125),  // KEY_LEFTMETA
+            (.capsLock, 58),  // KEY_CAPSLOCK
         ]
         for (flag, linuxCode) in modifiers {
             let wasDown = prev.contains(flag)

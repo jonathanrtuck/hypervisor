@@ -22,7 +22,7 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **4x MSAA** — native Metal multisampling, no post-process AA
 - **Multi-core SMP** — hardware-backed vCPUs via Hypervisor.framework with PSCI CPU_ON
 - **Hardware GIC** — Apple Silicon's native GICv3, not software emulation
-- **Virtio devices** — 9P filesystem, keyboard, tablet (absolute pointer), Metal GPU
+- **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
 - **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
 - **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names
 - **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
