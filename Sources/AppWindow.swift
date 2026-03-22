@@ -37,12 +37,16 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Whether to stay windowed (skip fullscreen on launch).
     private let windowed: Bool
 
+    /// One-shot flag: true until the first fullscreen transition fires.
+    private var pendingFullscreen: Bool
+
     /// Input event callbacks (set by main.swift after VM starts).
     var onKeyboardEvent: KeyboardEventCallback?
     var onTabletEvent: TabletEventCallback?
 
     init(windowed: Bool = false) {
         self.windowed = windowed
+        self.pendingFullscreen = !windowed
 
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this system")
@@ -88,6 +92,7 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.window.title = "Hypervisor"
         self.window.delegate = self
         self.window.collectionBehavior = [.fullScreenPrimary]
+        self.window.tabbingMode = .disallowed
         self.window.center()
         self.window.makeKeyAndOrderFront(nil)
 
@@ -167,14 +172,18 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
-        if !windowed {
-            // Enter fullscreen after the run loop has fully started. Dispatching
-            // async ensures the window is on-screen before the transition begins
-            // (toggleFullScreen is a no-op if the window isn't ready).
-            DispatchQueue.main.async {
-                self.window.toggleFullScreen(nil)
-            }
+        if pendingFullscreen {
+            pendingFullscreen = false
+            // Schedule on the run loop with a short delay — the window must
+            // be fully visible and the app active before toggleFullScreen
+            // will work. Direct async dispatch races with window ordering
+            // when launched from a terminal (cargo run / exec).
+            perform(#selector(enterFullScreen), with: nil, afterDelay: 0.3)
         }
+    }
+
+    @objc private func enterFullScreen() {
+        window.toggleFullScreen(nil)
     }
 
     private func setupMenuBar() {
@@ -232,6 +241,35 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         callback(EV_SYN, SYN_REPORT, 0)
     }
 
+    /// Track modifier flags to detect press/release transitions.
+    private var previousModifierFlags: NSEvent.ModifierFlags = []
+
+    /// Modifier keys arrive as `flagsChanged` events, not `keyDown`/`keyUp`.
+    /// Diff against previous state to emit the correct press or release.
+    func handleFlagsChanged(_ event: NSEvent) {
+        guard let callback = onKeyboardEvent else { return }
+
+        let flags = event.modifierFlags
+        let prev = previousModifierFlags
+        previousModifierFlags = flags
+
+        // Each modifier: check if it toggled on (press) or off (release).
+        let modifiers: [(NSEvent.ModifierFlags, UInt16)] = [
+            (.control, 29),   // KEY_LEFTCTRL
+            (.shift, 42),     // KEY_LEFTSHIFT
+            (.option, 56),    // KEY_LEFTALT
+            (.command, 125),  // KEY_LEFTMETA
+        ]
+        for (flag, linuxCode) in modifiers {
+            let wasDown = prev.contains(flag)
+            let isDown = flags.contains(flag)
+            if wasDown != isDown {
+                callback(EV_KEY, linuxCode, isDown ? 1 : 0)
+                callback(EV_SYN, SYN_REPORT, 0)
+            }
+        }
+    }
+
     func handleMouseEvent(_ event: NSEvent) {
         guard let callback = onTabletEvent else { return }
 
@@ -262,6 +300,9 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
 final class MetalView: NSView {
     weak var appWindow: AppWindow?
 
+    /// Whether the native macOS cursor is currently hidden (balanced hide/unhide).
+    private var cursorHidden = false
+
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
@@ -270,6 +311,23 @@ final class MetalView: NSView {
 
     override func keyUp(with event: NSEvent) {
         appWindow?.handleKeyEvent(event)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        appWindow?.handleFlagsChanged(event)
+    }
+
+    /// Intercept key equivalents before NSWindow consumes them.
+    /// macOS eats Ctrl+Tab (tab navigation) and Cmd+key (menu shortcuts)
+    /// at the window level, preventing keyDown from firing. We intercept
+    /// when modifiers are held and forward to the guest instead.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let interesting: NSEvent.ModifierFlags = [.control, .option, .command]
+        if event.type == .keyDown && !event.modifierFlags.intersection(interesting).isEmpty {
+            appWindow?.handleKeyEvent(event)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -289,6 +347,20 @@ final class MetalView: NSView {
         appWindow?.handleMouseButton(event)
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        if !cursorHidden {
+            NSCursor.hide()
+            cursorHidden = true
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if cursorHidden {
+            NSCursor.unhide()
+            cursorHidden = false
+        }
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         // Remove old tracking areas
@@ -298,7 +370,7 @@ final class MetalView: NSView {
         // Add new tracking area for mouse movement
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
