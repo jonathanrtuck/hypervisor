@@ -34,11 +34,16 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private(set) var displayWidth: Int = 1024
     private(set) var displayHeight: Int = 768
 
+    /// Whether to stay windowed (skip fullscreen on launch).
+    private let windowed: Bool
+
     /// Input event callbacks (set by main.swift after VM starts).
     var onKeyboardEvent: KeyboardEventCallback?
     var onTabletEvent: TabletEventCallback?
 
-    override init() {
+    init(windowed: Bool = false) {
+        self.windowed = windowed
+
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this system")
         }
@@ -162,8 +167,10 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
-        // Enter fullscreen after app is ready (matches QEMU's full-screen=on behavior).
-        window.toggleFullScreen(nil)
+        if !windowed {
+            // Enter fullscreen after app is ready (matches QEMU's full-screen=on behavior).
+            window.toggleFullScreen(nil)
+        }
     }
 
     private func setupMenuBar() {

@@ -72,6 +72,7 @@ hypervisor <kernel-elf> [options]
 Options:
   --verbose            Enable verbose logging
   --no-gpu             Boot without GPU (serial only, no window)
+  --windowed           Run in a window instead of fullscreen
   --ram SIZE           RAM size in MiB (default: 256)
   --cpus N             Number of vCPUs (default: 4)
   --share DIR          9P shared directory (auto-detected if omitted)
@@ -89,6 +90,9 @@ Signals:
 
 # Boot with a shared directory for 9P filesystem
 .build/debug/hypervisor kernel.elf --share ./rootfs
+
+# Windowed mode (skip fullscreen)
+.build/debug/hypervisor kernel.elf --windowed
 
 # Serial-only mode (no window, no GPU)
 .build/debug/hypervisor kernel.elf --no-gpu

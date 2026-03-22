@@ -25,6 +25,7 @@ struct Config {
     let kernelPath: String
     let verbose: Bool
     let noGpu: Bool
+    let windowed: Bool
     let ramMiB: Int
     let cpuCount: Int
     let shareDir: String?
@@ -44,6 +45,7 @@ func printUsage() {
     print("Options:")
     print("  --verbose            Enable verbose logging")
     print("  --no-gpu             Boot without GPU (serial only, no window)")
+    print("  --windowed           Run in a window instead of fullscreen")
     print("  --ram SIZE           RAM size in MiB (default: 256)")
     print("  --cpus N             Number of vCPUs (default: 4)")
     print("  --share DIR          9P shared directory (auto-detected if omitted)")
@@ -64,6 +66,7 @@ func parseArgs() -> Config {
     var kernelPath: String?
     var verbose = false
     var noGpu = false
+    var windowed = false
     var ramMiB = 256
     var cpuCount = 4
     var shareDir: String?
@@ -79,6 +82,8 @@ func parseArgs() -> Config {
             verbose = true
         case "--no-gpu":
             noGpu = true
+        case "--windowed":
+            windowed = true
         case "--ram":
             guard i + 1 < args.count, let val = Int(args[i + 1]), val > 0 else {
                 print("Error: --ram requires a positive integer (MiB)")
@@ -139,6 +144,7 @@ func parseArgs() -> Config {
         kernelPath: kernel,
         verbose: verbose,
         noGpu: noGpu,
+        windowed: windowed,
         ramMiB: ramMiB,
         cpuCount: cpuCount,
         shareDir: shareDir,
@@ -230,7 +236,7 @@ func main() throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
 
-        let window = AppWindow()
+        let window = AppWindow(windowed: config.windowed)
         appWindow = window
 
         let backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
