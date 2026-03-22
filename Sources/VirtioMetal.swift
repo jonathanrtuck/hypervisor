@@ -42,7 +42,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     /// Tracks unknown command IDs already logged (log each ID only once).
     private var loggedUnknownCommands: Set<UInt16> = []
 
-    // Display dimensions
+    // Display dimensions (set from layer's drawable size at init)
     var displayWidth: UInt32 = 1024
     var displayHeight: UInt32 = 768
 
@@ -87,6 +87,11 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         self.device = device
         self.commandQueue = device.makeCommandQueue()!
         self.layer = layer
+
+        // Read native resolution from the layer's drawable size (set by AppWindow).
+        let drawableSize = layer.drawableSize
+        self.displayWidth = UInt32(drawableSize.width)
+        self.displayHeight = UInt32(drawableSize.height)
 
         // Vertex descriptor matching the guest's Vertex struct:
         // position (float2) + texCoord (float2) + color (float4) = 32 bytes

@@ -170,6 +170,34 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 | 2    | virtio-input | 50        | 18        | Tablet / absolute pointer               |
 | 3    | virtio-metal | 51        | 22        | Metal GPU command passthrough           |
 
+## Virtio Device Architecture
+
+Each virtio backend maps one virtio device to one Apple framework. The guest always sees standard virtio; the host always sees native macOS APIs. No translation layers in between.
+
+| Backend       | Virtio Device    | Apple Framework | Guest Sees           | Host Uses                 |
+| ------------- | ---------------- | --------------- | -------------------- | ------------------------- |
+| `Virtio9P`    | 9P filesystem    | Foundation (FS) | 9P2000.L protocol    | macOS file I/O            |
+| `VirtioInput` | Input (keyboard) | AppKit          | evdev key events     | NSEvent key events        |
+| `VirtioInput` | Input (tablet)   | AppKit          | evdev abs events     | NSEvent mouse tracking    |
+| `VirtioMetal` | GPU (device 22)  | Metal           | Metal command stream | MTLDevice/MTLCommandQueue |
+
+This pattern is the organizing principle for all backends, current and future. Adding a new backend means: pick a virtio device type (standard or custom), write a Swift class that translates between virtio virtqueues and the corresponding Apple framework, register it at a slot in `main.swift`.
+
+### Planned Backends
+
+These are not yet implemented. Slot assignments and details may change.
+
+**virtio-sound** (device ID 25) — Audio playback and capture via CoreAudio. Two virtqueues: TX for playback, RX for capture. The guest negotiates PCM stream parameters (sample rate, channels, format) via virtio-sound's standard config space. The host backend creates a CoreAudio audio unit and bridges PCM buffers. Needed for audio/video content types.
+
+**Networking** — Two options under consideration:
+
+- _virtio-net_ (device ID 1): Standard NIC. The guest needs a TCP/IP stack. The host bridges via `Network.framework` (userspace packet injection) or a `utun` device.
+- _HTTP bridge_ (custom device): A higher-level alternative that exposes HTTP request/response and WebSocket semantics directly over virtio. The guest sends structured HTTP requests; the host executes them via `URLSession`. Avoids the guest needing a full TCP/IP stack at the cost of not supporting arbitrary protocols. Better fit for a document-centric OS that primarily needs web, email, and messaging.
+
+**Clipboard bridge** — Copy/paste between host and guest. Either a custom virtio device or an extension of virtio-input. The host side reads and writes `NSPasteboard`. The guest side exposes a simple get/put interface for the OS clipboard abstraction.
+
+**File drag-drop** — Drag files between host Finder and guest window. Could extend virtio-9p (the file is already accessible via the shared directory) or use a custom device that sends file metadata + path on drop events. The host side hooks `NSDraggingDestination` / `NSDraggingSource` on the AppKit window.
+
 ## Metal GPU Protocol
 
 The Metal passthrough protocol is a simple command stream over two virtqueues. See [`PROTOCOL.md`](PROTOCOL.md) for the full specification.

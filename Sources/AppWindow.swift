@@ -30,7 +30,7 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let window: NSWindow
     let contentView: MetalView
 
-    /// Current display dimensions (set by guest via GET_DISPLAY_INFO response).
+    /// Current display dimensions in physical pixels (Retina-aware).
     private(set) var displayWidth: Int = 1024
     private(set) var displayHeight: Int = 768
 
@@ -45,20 +45,29 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.metalDevice = device
         self.commandQueue = device.makeCommandQueue()!
 
+        // Detect native screen resolution in physical pixels.
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let scaleFactor = screen.backingScaleFactor
+        let screenFrame = screen.frame
+        let nativeWidth = Int(screenFrame.width * scaleFactor)
+        let nativeHeight = Int(screenFrame.height * scaleFactor)
+        self.displayWidth = nativeWidth
+        self.displayHeight = nativeHeight
+
         // Create Metal layer
         let layer = CAMetalLayer()
         layer.device = device
         layer.pixelFormat = .bgra8Unorm
         layer.framebufferOnly = false
-        layer.drawableSize = CGSize(width: displayWidth, height: displayHeight)
+        layer.drawableSize = CGSize(width: nativeWidth, height: nativeHeight)
         self.metalLayer = layer
 
-        // Create content view
-        let frame = NSRect(x: 0, y: 0, width: displayWidth, height: displayHeight)
+        // Create content view (window starts at screen size, will go fullscreen)
+        let frame = NSRect(x: 0, y: 0, width: Int(screenFrame.width), height: Int(screenFrame.height))
         self.contentView = MetalView(frame: frame)
         self.contentView.wantsLayer = true
 
-        // Create window
+        // Create window (fullscreen-capable)
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
         self.window = NSWindow(
             contentRect: frame,
@@ -73,6 +82,7 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.window.contentView = self.contentView
         self.window.title = "Hypervisor"
         self.window.delegate = self
+        self.window.collectionBehavior = [.fullScreenPrimary]
         self.window.center()
         self.window.makeKeyAndOrderFront(nil)
 
@@ -152,6 +162,8 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
+        // Enter fullscreen after app is ready (matches QEMU's full-screen=on behavior).
+        window.toggleFullScreen(nil)
     }
 
     private func setupMenuBar() {
