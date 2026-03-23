@@ -308,7 +308,9 @@ func main() throws {
             }
 
             // Wire onFrame callback: inject keyboard/tablet events at scheduled frames.
-            let viewSize = window.metalLayer.bounds.size
+            // Use drawableSize (pixels) not bounds (points) — event script coordinates
+            // match --resolution (pixel dimensions), not the window's point size.
+            let fbSize = window.metalLayer.drawableSize
             backend.onFrame = { [weak vm] frame in
                 guard let vm = vm else { return }
                 let events = schedule.actionsForFrame(frame)
@@ -325,8 +327,8 @@ func main() throws {
                         kb.injectEvent(type: type, code: code, value: value,
                                        state: kbTransport.currentQueueState(queue: 0), vm: vm)
                     case .pointer(let x, let y):
-                        let absX = UInt32(max(0, min(32767, x / Float(viewSize.width) * 32767)))
-                        let absY = UInt32(max(0, min(32767, y / Float(viewSize.height) * 32767)))
+                        let absX = UInt32(max(0, min(32767, x / Float(fbSize.width) * 32767)))
+                        let absY = UInt32(max(0, min(32767, y / Float(fbSize.height) * 32767)))
                         tab.injectEvent(type: 3, code: 0, value: absX,
                                         state: tabTransport.currentQueueState(queue: 0), vm: vm)
                         tab.injectEvent(type: 3, code: 1, value: absY,

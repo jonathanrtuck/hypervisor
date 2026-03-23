@@ -6,8 +6,8 @@
 ///     type hello world     — type each character with key press/release
 ///     key backspace        — press a single key
 ///     key shift+left       — press a modified key (modifier held)
-///     click 100 200        — click at (x, y) in points
-///     dblclick 100 200     — double-click at (x, y) in points
+///     click 100 200        — click at (x, y) in framebuffer pixels
+///     dblclick 100 200     — double-click at (x, y) in framebuffer pixels
 ///     wait 10              — wait 10 extra frames
 ///     capture /tmp/out.png — capture screenshot
 ///
@@ -98,7 +98,7 @@ private func charToKey(_ ch: Character) -> (code: UInt16, shift: Bool)? {
 enum FrameAction {
     /// Keyboard event: type (EV_KEY/EV_SYN), code (keycode), value (1=press, 0=release).
     case keyboard(type: UInt16, code: UInt16, value: UInt32)
-    /// Move pointer to (x, y) in points. Converted to absolute tablet coords at injection time.
+    /// Move pointer to (x, y) in framebuffer pixels. Converted to absolute tablet coords at injection time.
     case pointer(x: Float, y: Float)
     /// Tablet button event (BTN_LEFT etc.). Separate from keyboard because it goes to the tablet device.
     case button(code: UInt16, value: UInt32)
