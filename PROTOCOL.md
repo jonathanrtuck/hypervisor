@@ -403,6 +403,54 @@ Payload: (none)
 
 The host presents the CAMetalLayer drawable (if one was acquired via `DRAWABLE_HANDLE`) and commits the Metal command buffer. The guest should wait for the virtio completion before submitting the next frame.
 
+If the cursor plane is active (visible, with a cursor image set), the host composites the cursor onto the drawable in a separate render pass immediately before presenting. This cursor plane is independent of the guest's scene graph — the guest does not need to render the cursor itself.
+
+### Cursor Plane
+
+The cursor plane provides hardware-cursor-like compositing. The host maintains a small BGRA texture (the cursor image) and composites it onto the drawable at the current position before each `PRESENT_AND_COMMIT`. This decouples cursor rendering from the guest's scene graph and render pipeline, eliminating cursor lag.
+
+The guest sends the cursor image once (or on shape change), updates the position each frame, and controls visibility. The host handles compositing — the guest never draws the cursor into its framebuffer.
+
+#### `SET_CURSOR_IMAGE` (0x0F10)
+
+Upload a cursor image with hotspot offset.
+
+```text
+Payload:
+  u16   width          Cursor width in pixels (max 256)
+  u16   height         Cursor height in pixels (max 256)
+  i16   hotspot_x      Hotspot X offset in image pixels
+  i16   hotspot_y      Hotspot Y offset in image pixels
+  u8[]  bgra_pixels    BGRA pixel data (premultiplied alpha), width * height * 4 bytes
+```
+
+The cursor image is composited with premultiplied alpha blending (src=one, dst=oneMinusSourceAlpha). The hotspot defines the click point within the image — the host offsets the draw position so the hotspot aligns with the cursor position.
+
+Pixel format is BGRA with sRGB encoding (the host creates the texture as `bgra8Unorm_srgb` for gamma-correct compositing).
+
+#### `SET_CURSOR_POSITION` (0x0F11)
+
+Update the cursor position in framebuffer pixels.
+
+```text
+Payload:
+  f32   x              Cursor X in framebuffer pixels (the click point)
+  f32   y              Cursor Y in framebuffer pixels (the click point)
+```
+
+The position is the logical cursor location (where a click would land). The host subtracts the hotspot offset to compute the image draw position. Uses `f32` for subpixel precision.
+
+#### `SET_CURSOR_VISIBLE` (0x0F12)
+
+Show or hide the cursor plane.
+
+```text
+Payload:
+  u8    visible        1 = show, 0 = hide
+```
+
+When hidden, the cursor plane is not composited. The guest should hide the cursor on keyboard input and show it on mouse movement.
+
 ## Enumerations
 
 ### Pixel Format

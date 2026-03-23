@@ -81,6 +81,18 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     private var currentBlitEncoder: MTLBlitCommandEncoder?
     private var currentDrawable: CAMetalDrawable?
 
+    // Cursor plane — composited after guest content, before present
+    private var cursorTexture: MTLTexture?
+    private var cursorPipeline: MTLRenderPipelineState?
+    private var cursorPosition: SIMD2<Float> = .zero
+    private var cursorHotspot: SIMD2<Float> = .zero
+    private var cursorSize: SIMD2<Float> = .zero
+    private var cursorVisible: Bool = false
+
+    // Retained frame — cursor-free scene content for cursor-only presents.
+    // Emulates the persistent framebuffer of real display hardware.
+    private var retainedFrame: MTLTexture?
+
     /// Available ring index tracker per queue.
     private var lastAvailIdx: [UInt16] = [0, 0]
 
@@ -105,6 +117,36 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         vd.attributes[2].format = .float4; vd.attributes[2].offset = 16; vd.attributes[2].bufferIndex = 0
         vd.layouts[0].stride = 32
         self.vertexDescriptor = vd
+
+        // Cursor plane pipeline — simple alpha-blend textured quad.
+        let cursorMSL = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct COut { float4 pos [[position]]; float2 uv; };
+        vertex COut cursor_vs(uint vid [[vertex_id]], constant float4 *v [[buffer(0)]]) {
+            COut o; o.pos = float4(v[vid].xy, 0, 1); o.uv = v[vid].zw; return o;
+        }
+        fragment float4 cursor_fs(COut in [[stage_in]], texture2d<float> t [[texture(0)]]) {
+            constexpr sampler s(filter::nearest);
+            return t.sample(s, in.uv);
+        }
+        """
+        do {
+            let lib = try device.makeLibrary(source: cursorMSL, options: nil)
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = lib.makeFunction(name: "cursor_vs")
+            desc.fragmentFunction = lib.makeFunction(name: "cursor_fs")
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+            desc.colorAttachments[0].isBlendingEnabled = true
+            // Premultiplied alpha blending.
+            desc.colorAttachments[0].sourceRGBBlendFactor = .one
+            desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            desc.colorAttachments[0].sourceAlphaBlendFactor = .one
+            desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            cursorPipeline = try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            print("VirtioMetal: cursor pipeline failed: \(error)")
+        }
 
         print("VirtioMetal: initialized (\(displayWidth)×\(displayHeight))")
     }
@@ -329,12 +371,26 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
             let desc = MTLDepthStencilDescriptor()
             if enabled != 0 {
-                let stencilDesc = MTLStencilDescriptor()
-                stencilDesc.stencilCompareFunction = mapCompareFunction(compareFn)
-                stencilDesc.depthStencilPassOperation = mapStencilOperation(passOp)
-                stencilDesc.stencilFailureOperation = mapStencilOperation(failOp)
-                desc.frontFaceStencil = stencilDesc
-                desc.backFaceStencil = stencilDesc
+                let frontDesc = MTLStencilDescriptor()
+                frontDesc.stencilCompareFunction = mapCompareFunction(compareFn)
+                frontDesc.depthStencilPassOperation = mapStencilOperation(passOp)
+                frontDesc.stencilFailureOperation = mapStencilOperation(failOp)
+                desc.frontFaceStencil = frontDesc
+
+                // Two-sided stencil: if payload has back-face ops (size >= 12),
+                // use separate back-face descriptor. Otherwise, mirror front.
+                if size >= 12 {
+                    let backDesc = MTLStencilDescriptor()
+                    let backCompareFn = payload.loadUnaligned(fromByteOffset: 8, as: UInt8.self)
+                    let backPassOp    = payload.loadUnaligned(fromByteOffset: 9, as: UInt8.self)
+                    let backFailOp    = payload.loadUnaligned(fromByteOffset: 10, as: UInt8.self)
+                    backDesc.stencilCompareFunction = mapCompareFunction(backCompareFn)
+                    backDesc.depthStencilPassOperation = mapStencilOperation(backPassOp)
+                    backDesc.stencilFailureOperation = mapStencilOperation(backFailOp)
+                    desc.backFaceStencil = backDesc
+                } else {
+                    desc.backFaceStencil = frontDesc
+                }
             }
             depthStencilStates[handle] = device.makeDepthStencilState(descriptor: desc)
             if verbose { print("VirtioMetal: depth/stencil state \(handle)") }
@@ -640,6 +696,44 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 to: dstTex, destinationSlice: 0, destinationLevel: 0,
                 destinationOrigin: MTLOrigin(x: Int(dx), y: Int(dy), z: 0))
 
+        // ── Cursor plane commands ────────────────────────────────────
+
+        case .setCursorImage:
+            guard size >= 8 else { return }
+            let w  = Int(payload.loadUnaligned(fromByteOffset: 0, as: UInt16.self))
+            let h  = Int(payload.loadUnaligned(fromByteOffset: 2, as: UInt16.self))
+            let hx = Float(payload.loadUnaligned(fromByteOffset: 4, as: Int16.self))
+            let hy = Float(payload.loadUnaligned(fromByteOffset: 6, as: Int16.self))
+            let bpr = w * 4
+            guard w > 0 && h > 0 && w <= 256 && h <= 256 else { return }
+            guard size >= 8 + bpr * h else { return }
+
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm_srgb,
+                width: w, height: h, mipmapped: false)
+            desc.usage = .shaderRead
+            desc.storageMode = .shared
+            if let tex = device.makeTexture(descriptor: desc) {
+                tex.replace(
+                    region: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: w, height: h, depth: 1)),
+                    mipmapLevel: 0, withBytes: payload + 8, bytesPerRow: bpr)
+                cursorTexture = tex
+                cursorHotspot = SIMD2<Float>(hx, hy)
+                cursorSize = SIMD2<Float>(Float(w), Float(h))
+                if verbose { print("VirtioMetal: cursor image \(w)×\(h) hotspot=(\(hx),\(hy))") }
+            }
+
+        case .setCursorPosition:
+            guard size >= 8 else { return }
+            cursorPosition.x = payload.loadUnaligned(fromByteOffset: 0, as: Float.self)
+            cursorPosition.y = payload.loadUnaligned(fromByteOffset: 4, as: Float.self)
+
+        case .setCursorVisible:
+            guard size >= 1 else { return }
+            cursorVisible = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self) != 0
+
+        // ── Frame control ────────────────────────────────────────────
+
         case .presentAndCommit:
             // Check SIGUSR1 signal flag (set from signal handler).
             if _signalCaptureFlag != 0 {
@@ -649,13 +743,14 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let shouldCapture = captureNextFrame
                 || captureFrames.contains(frameCount)
 
-            // Present and commit the main command buffer FIRST so the
-            // drawable texture contains the rendered content.
-            if let drawable = currentDrawable {
-                currentCommandBuffer?.present(drawable)
+            // Composite cursor plane onto the drawable before presenting.
+            if let drawable = currentDrawable, let cb = currentCommandBuffer {
+                compositeCursor(onto: drawable.texture, commandBuffer: cb)
+
+                cb.present(drawable)
+                cb.commit()
+                cb.waitUntilCompleted()
             }
-            currentCommandBuffer?.commit()
-            currentCommandBuffer?.waitUntilCompleted()
 
             // Capture AFTER the render commands have executed.
             if shouldCapture, let drawable = currentDrawable {
@@ -709,6 +804,62 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 }
             }
         }
+    }
+
+    // MARK: - Retained frame (emulates persistent framebuffer)
+
+    private func ensureRetainedFrame() {
+        guard retainedFrame == nil else { return }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: Int(displayWidth), height: Int(displayHeight),
+            mipmapped: false)
+        desc.usage = [.shaderRead, .renderTarget]
+        desc.storageMode = .private
+        retainedFrame = device.makeTexture(descriptor: desc)
+    }
+
+    // MARK: - Cursor plane compositing
+
+    /// Encode cursor overlay onto a drawable texture. Returns true if cursor was drawn.
+    @discardableResult
+    private func compositeCursor(
+        onto drawableTex: MTLTexture,
+        commandBuffer cb: MTLCommandBuffer
+    ) -> Bool {
+        guard cursorVisible, let curTex = cursorTexture,
+              let pipeline = cursorPipeline else { return false }
+
+        let dw = Float(displayWidth)
+        let dh = Float(displayHeight)
+
+        let x0 = cursorPosition.x - cursorHotspot.x
+        let y0 = cursorPosition.y - cursorHotspot.y
+        let x1 = x0 + cursorSize.x
+        let y1 = y0 + cursorSize.y
+
+        let nx0 = (x0 / dw) * 2.0 - 1.0
+        let nx1 = (x1 / dw) * 2.0 - 1.0
+        let ny0 = 1.0 - (y0 / dh) * 2.0
+        let ny1 = 1.0 - (y1 / dh) * 2.0
+
+        var verts: [SIMD4<Float>] = [
+            SIMD4(nx0, ny0, 0, 0), SIMD4(nx1, ny0, 1, 0), SIMD4(nx0, ny1, 0, 1),
+            SIMD4(nx1, ny0, 1, 0), SIMD4(nx1, ny1, 1, 1), SIMD4(nx0, ny1, 0, 1),
+        ]
+
+        let passDesc = MTLRenderPassDescriptor()
+        passDesc.colorAttachments[0].texture = drawableTex
+        passDesc.colorAttachments[0].loadAction = .load
+        passDesc.colorAttachments[0].storeAction = .store
+
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: passDesc) else { return false }
+        enc.setRenderPipelineState(pipeline)
+        enc.setVertexBytes(&verts, length: MemoryLayout<SIMD4<Float>>.stride * 6, index: 0)
+        enc.setFragmentTexture(curTex, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+        enc.endEncoding()
+        return true
     }
 
     // MARK: - Interrupt delivery

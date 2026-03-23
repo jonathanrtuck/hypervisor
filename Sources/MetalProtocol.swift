@@ -188,6 +188,20 @@ enum MetalRenderCommand: UInt16 {
     /// Present the drawable and commit the command buffer.
     /// Payload: (none)
     case presentAndCommit     = 0x0F00
+
+    // ── Cursor plane ────────────────────────────────────────────────
+
+    /// Set cursor image (BGRA pixels, premultiplied alpha).
+    /// Payload: [u16 width] [u16 height] [i16 hotspot_x] [i16 hotspot_y] [u8... bgra_pixels]
+    case setCursorImage       = 0x0F10
+
+    /// Update cursor position in framebuffer pixels.
+    /// Payload: [f32 x] [f32 y]
+    case setCursorPosition    = 0x0F11
+
+    /// Show or hide the cursor plane.
+    /// Payload: [u8 visible]
+    case setCursorVisible     = 0x0F12
 }
 
 // MARK: - Pixel format mapping

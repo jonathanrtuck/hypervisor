@@ -78,6 +78,8 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 
 Two virtqueues: queue 0 (setup — object creation) and queue 1 (render — per-frame commands). Commands are 8-byte header (`u16 method_id`, `u16 flags`, `u32 payload_size`) + payload. Guest-assigned `u32` handles map to real Metal objects on the host. Full spec in `PROTOCOL.md`.
 
+**Cursor plane:** The host provides a hardware-cursor-like overlay via three commands (`SET_CURSOR_IMAGE`, `SET_CURSOR_POSITION`, `SET_CURSOR_VISIBLE`). The cursor is composited onto the drawable in a separate render pass before `PRESENT_AND_COMMIT`, independent of the guest's scene graph. This eliminates cursor lag by bypassing the guest's render pipeline. The cursor pipeline uses premultiplied alpha blending with sRGB-correct compositing.
+
 ## Swift Conventions
 
 - Swift 6 package (`swift-tools-version: 6.0`) but uses Swift 5 language mode (`swiftLanguageMode(.v5)`) to avoid strict concurrency requirements
