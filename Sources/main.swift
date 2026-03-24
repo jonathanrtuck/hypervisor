@@ -419,6 +419,14 @@ func main() throws {
             )
         }
 
+        // Host-side cursor: update cursor position directly on the GPU
+        // backend, bypassing the virtio round-trip for zero-latency display.
+        window.onCursorPosition = { x, y in
+            guard let gpuTransport = vm.virtioDevices[3] else { return }
+            let gpuBackend = gpuTransport.backend as! VirtioMetalBackend
+            gpuBackend.updateCursorFromHost(x: x, y: y)
+        }
+
         // Activate and run the application.
         // In automated mode (--events), skip activation — the window exists
         // for Metal but doesn't need to be visible or steal focus.

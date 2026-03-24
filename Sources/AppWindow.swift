@@ -43,6 +43,9 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Input event callbacks (set by main.swift after VM starts).
     var onKeyboardEvent: KeyboardEventCallback?
     var onTabletEvent: TabletEventCallback?
+    /// Host-side cursor position callback (framebuffer pixels, top-left origin).
+    /// Called on every mouse move for zero-latency cursor compositing.
+    var onCursorPosition: ((Float, Float) -> Void)?
 
     init(windowed: Bool = false, resolution: (Int, Int)? = nil, background: Bool = false) {
         self.windowed = windowed
@@ -292,19 +295,26 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func handleMouseEvent(_ event: NSEvent) {
-        guard let callback = onTabletEvent else { return }
-
-        // Convert window coordinates to absolute tablet coordinates (0..32767)
         let loc = contentView.convert(event.locationInWindow, from: nil)
         let bounds = contentView.bounds
 
-        let absX = UInt32(max(0, min(32767, (loc.x / bounds.width) * 32767)))
-        // Flip Y: NSView has origin at bottom-left, guest expects top-left
-        let absY = UInt32(max(0, min(32767, ((bounds.height - loc.y) / bounds.height) * 32767)))
+        // Host-side cursor position (framebuffer pixels, top-left origin).
+        // Fires before the virtio round-trip for zero-latency compositing.
+        if let cursorCb = onCursorPosition {
+            let scale = contentView.window?.backingScaleFactor ?? 2.0
+            let px = Float(loc.x * scale)
+            let py = Float((bounds.height - loc.y) * scale)
+            cursorCb(px, py)
+        }
 
-        callback(EV_ABS, ABS_X, absX)
-        callback(EV_ABS, ABS_Y, absY)
-        callback(EV_SYN, SYN_REPORT, 0)
+        // Virtio tablet path (guest hit testing, pointer state register).
+        if let callback = onTabletEvent {
+            let absX = UInt32(max(0, min(32767, (loc.x / bounds.width) * 32767)))
+            let absY = UInt32(max(0, min(32767, ((bounds.height - loc.y) / bounds.height) * 32767)))
+            callback(EV_ABS, ABS_X, absX)
+            callback(EV_ABS, ABS_Y, absY)
+            callback(EV_SYN, SYN_REPORT, 0)
+        }
     }
 
     func handleMouseButton(_ event: NSEvent) {

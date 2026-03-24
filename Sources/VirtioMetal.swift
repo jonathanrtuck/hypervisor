@@ -863,6 +863,20 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         retainedFrame = device.makeTexture(descriptor: desc)
     }
 
+    // MARK: - Host-side cursor position
+
+    /// Update cursor position directly from host NSEvent coordinates,
+    /// bypassing the guest virtio round-trip. This gives zero-latency
+    /// cursor movement — the guest still receives pointer position via
+    /// virtio-input for hit testing, but the visual cursor composited
+    /// by `compositeCursor` uses this host-side position.
+    ///
+    /// Coordinates are in framebuffer pixels (same as setCursorPosition).
+    func updateCursorFromHost(x: Float, y: Float) {
+        cursorPosition.x = x
+        cursorPosition.y = y
+    }
+
     // MARK: - Cursor plane compositing
 
     /// Encode cursor overlay onto a drawable texture. Returns true if cursor was drawn.
