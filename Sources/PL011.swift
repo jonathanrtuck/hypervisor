@@ -5,6 +5,8 @@
 /// - Write DR (offset 0x00): transmit a character
 ///
 /// This emulation always reports FIFO not full and prints characters to stdout.
+/// All output is accumulated in a log buffer for inclusion in crash reports
+/// (written by the pvpanic handler when the kernel signals a panic).
 
 import Foundation
 
@@ -26,6 +28,25 @@ final class PL011 {
     /// Total bytes transmitted (for diagnostics)
     private(set) var txCount: Int = 0
 
+    /// Accumulated serial output for crash reporting (interleaved, all cores).
+    private var logData = Data()
+
+    /// Lock protecting logData from concurrent vCPU access.
+    /// Multiple guest cores can write to UART simultaneously (the kernel's
+    /// panic_puts bypasses locks to avoid deadlock).
+    private let lock = NSLock()
+
+    /// Full serial log as a string (for crash reports).
+    ///
+    /// Uses lossy UTF-8 decoding — invalid byte sequences (from multi-core
+    /// interleaving of emoji markers) become U+FFFD replacement characters.
+    /// Thread-safe — acquires the lock to read logData.
+    var serialLog: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(decoding: logData, as: UTF8.self)
+    }
+
     /// Handle a write to a PL011 register.
     func write(offset: UInt64, value: UInt32) {
         switch offset {
@@ -34,7 +55,12 @@ final class PL011 {
             let ch = UInt8(value & 0xFF)
             txCount += 1
 
-            // Write to stdout
+            // Accumulate for crash log
+            lock.lock()
+            logData.append(ch)
+            lock.unlock()
+
+            // Write to stdout (outside lock — stdout has its own buffering)
             var byte = ch
             _ = Foundation.write(STDOUT_FILENO, &byte, 1)
 

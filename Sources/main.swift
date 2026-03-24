@@ -245,6 +245,8 @@ func main() throws {
         verbose: config.verbose
     )
 
+    vm.config = config
+
     // Load kernel ELF into guest memory
     let entry = try vm.loadKernelELF(kernelData)
     print("  Kernel entry point: 0x\(String(entry, radix: 16))")

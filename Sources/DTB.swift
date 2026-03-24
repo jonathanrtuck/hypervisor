@@ -58,6 +58,14 @@ enum DTB {
         b.prop_reg(0x0901_0000, 0x1000)
         b.endNode()
 
+        // pvpanic node — paravirtual panic notification device.
+        // The guest kernel writes 0x01 to this MMIO register to signal panic,
+        // allowing the hypervisor to capture state and write a crash report.
+        b.beginNode("pvpanic@9020000")
+        b.prop_string("compatible", "qemu,pvpanic-mmio")
+        b.prop_reg(0x0902_0000, 0x2)
+        b.endNode()
+
         // Chosen node (tells kernel where stdout is)
         b.beginNode("chosen")
         b.prop_string("stdout-path", "/pl011@9000000")

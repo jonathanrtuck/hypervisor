@@ -38,6 +38,9 @@ final class VirtualMachine {
     /// PL011 UART emulation.
     let uart = PL011()
 
+    /// pvpanic device — paravirtual panic notification.
+    let pvpanic = PVPanic()
+
     /// Virtio MMIO devices, indexed by slot number (0-31).
     var virtioDevices: [Int: VirtioMMIOTransport] = [:]
 
@@ -46,6 +49,9 @@ final class VirtualMachine {
     var vcpuEntries: [(entryAddr: UInt64, contextId: UInt64)] = []
     var vcpuStarted: [Bool] = []
     let psciLock = NSLock()
+
+    /// VM configuration (set after init for crash report metadata).
+    var config: Config?
 
     init(ramSize: Int, ramBase: UInt64, verbose: Bool) throws {
         self.ramBase = ramBase

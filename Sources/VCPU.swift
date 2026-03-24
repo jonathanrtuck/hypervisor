@@ -24,6 +24,8 @@ let UART_BASE: UInt64     = 0x0900_0000
 let UART_SIZE: UInt64     = 0x1000
 let PL031_BASE: UInt64    = 0x0901_0000
 let PL031_SIZE: UInt64    = 0x1000
+let PVPANIC_BASE: UInt64  = 0x0902_0000
+let PVPANIC_SIZE: UInt64  = 0x1000
 let GIC_DIST_BASE: UInt64 = 0x0800_0000
 let GIC_REDIST_BASE: UInt64 = 0x080A_0000
 let VIRTIO_BASE: UInt64   = 0x0A00_0000
@@ -36,6 +38,8 @@ final class VCPU {
     let exitInfo: UnsafeMutablePointer<hv_vcpu_exit_t>
 
     private var running = true
+    /// vCPU exit count — tracks how many times hv_vcpu_run has returned.
+    private(set) var exitCount: UInt64 = 0
     /// True if we masked the vtimer's IMASK bit (need to unmask when timer condition clears).
     private var timerMaskedByUs = false
 
@@ -122,7 +126,6 @@ final class VCPU {
     // MARK: - Execution loop
 
     func run() throws {
-        var exitCount: UInt64 = 0
         let maxExits: UInt64 = 100_000_000  // Safety limit
 
         while running && exitCount < maxExits {
@@ -184,6 +187,48 @@ final class VCPU {
             print("vCPU[\(index)]: hit exit limit (\(maxExits))")
         }
         print("vCPU[\(index)]: stopped after \(exitCount) exits")
+    }
+
+    // MARK: - Crash snapshot
+
+    /// Capture full vCPU register state for crash reporting.
+    ///
+    /// Must be called from this vCPU's thread during an exit handler (not while
+    /// hv_vcpu_run is active). Reads all GPRs and key system registers.
+    func captureSnapshot(exitCount: UInt64) -> CrashSnapshot? {
+        do {
+            var gprs: [UInt64] = []
+            gprs.reserveCapacity(31)
+            for i: UInt32 in 0...30 {
+                gprs.append(try getReg(hv_reg_t(rawValue: HV_REG_X0.rawValue + i)))
+            }
+
+            return CrashSnapshot(
+                vcpuIndex: index,
+                exitCount: exitCount,
+                timestamp: Date(),
+                pc: try getReg(HV_REG_PC),
+                cpsr: try getReg(HV_REG_CPSR),
+                gprs: gprs,
+                elr_el1: try getSysReg(HV_SYS_REG_ELR_EL1),
+                esr_el1: try getSysReg(HV_SYS_REG_ESR_EL1),
+                far_el1: try getSysReg(HV_SYS_REG_FAR_EL1),
+                spsr_el1: try getSysReg(HV_SYS_REG_SPSR_EL1),
+                sp_el1: try getSysReg(HV_SYS_REG_SP_EL1),
+                sctlr_el1: try getSysReg(HV_SYS_REG_SCTLR_EL1),
+                tcr_el1: try getSysReg(HV_SYS_REG_TCR_EL1),
+                ttbr0_el1: try getSysReg(HV_SYS_REG_TTBR0_EL1),
+                ttbr1_el1: try getSysReg(HV_SYS_REG_TTBR1_EL1),
+                mpidr_el1: try getSysReg(HV_SYS_REG_MPIDR_EL1),
+                tpidr_el1: try getSysReg(HV_SYS_REG_TPIDR_EL1),
+                vbar_el1: try getSysReg(HV_SYS_REG_VBAR_EL1),
+                cntv_ctl: try getSysReg(HV_SYS_REG_CNTV_CTL_EL0),
+                cntv_cval: try getSysReg(HV_SYS_REG_CNTV_CVAL_EL0)
+            )
+        } catch {
+            print("vCPU[\(index)]: failed to capture crash snapshot: \(error)")
+            return nil
+        }
     }
 
     // MARK: - Exit handling
@@ -305,6 +350,35 @@ final class VCPU {
                 } else {
                     try writeSrt(0)
                 }
+            }
+        } else if pa >= PVPANIC_BASE && pa < PVPANIC_BASE + PVPANIC_SIZE {
+            // pvpanic — paravirtual panic notification (QEMU spec).
+            // Write 0x01 = kernel panic. The kernel signals this after finishing
+            // its diagnostic output, so the serial log is already complete.
+            let offset = pa - PVPANIC_BASE
+            if isWrite {
+                let val = try readSrt()
+                if vm.pvpanic.write(offset: offset, value: UInt32(val & 0xFF)) {
+                    // Kernel signaled panic — capture state, write report, exit.
+                    // This is the authoritative panic signal (vs UART detection
+                    // which is a heuristic fallback).
+                    if let snapshot = captureSnapshot(exitCount: exitCount) {
+                        let path = writeCrashReport(
+                            snapshot: snapshot,
+                            serialLog: vm.uart.serialLog,
+                            config: vm.config
+                        )
+                        if let path = path {
+                            FileHandle.standardError.write(
+                                Data("\n── Crash report written to \(path) ──\n".utf8)
+                            )
+                        }
+                    }
+                    exit(1)
+                }
+            } else {
+                let val = vm.pvpanic.read(offset: offset)
+                try writeSrt(UInt64(val))
             }
         } else if pa >= GIC_DIST_BASE && pa < GIC_DIST_BASE + 0x10000 {
             // GIC distributor — handled by Apple's hv_gic hardware emulation.
