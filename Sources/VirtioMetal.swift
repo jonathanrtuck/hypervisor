@@ -93,6 +93,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
     /// NSCursor built from guest cursor image — set on the NSView for
     /// zero-latency hardware cursor plane compositing by WindowServer.
+    /// When set, GPU compositeCursor() is skipped (NSCursor takes precedence).
     private(set) var hostCursor: NSCursor?
     /// Fired on main thread when guest uploads a new cursor image.
     var onCursorImageChanged: ((NSCursor) -> Void)?
@@ -764,9 +765,12 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 ) else { return }
                 // Copy our RGBA data into the rep's buffer.
                 memcpy(rep.bitmapData!, buf.baseAddress!, pixelCount * 4)
-                let img = NSImage(size: NSSize(width: w, height: h))
+                // Guest renders at physical pixels (Retina). NSCursor treats image
+                // size as points, so divide by scale factor to get correct display size.
+                let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+                let img = NSImage(size: NSSize(width: CGFloat(w) / scale, height: CGFloat(h) / scale))
                 img.addRepresentation(rep)
-                let hotspot = NSPoint(x: CGFloat(hx), y: CGFloat(hy))
+                let hotspot = NSPoint(x: CGFloat(hx) / scale, y: CGFloat(hy) / scale)
                 let cursor = NSCursor(image: img, hotSpot: hotspot)
                 self.hostCursor = cursor
                 if let cb = self.onCursorImageChanged {
@@ -816,7 +820,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                     blit.endEncoding()
                 }
 
-                compositeCursor(onto: drawable.texture, commandBuffer: cb)
+                // Skip GPU cursor compositing when NSCursor is active (hostCursor).
+                if hostCursor == nil {
+                    compositeCursor(onto: drawable.texture, commandBuffer: cb)
+                }
 
                 cb.present(drawable)
                 cb.commit()
@@ -835,7 +842,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                           to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
                           destinationOrigin: origin)
                 blit.endEncoding()
-                compositeCursor(onto: drawable.texture, commandBuffer: cb)
+                // Skip GPU cursor compositing when NSCursor is active (hostCursor).
+                if hostCursor == nil {
+                    compositeCursor(onto: drawable.texture, commandBuffer: cb)
+                }
 
                 cb.present(drawable)
                 cb.commit()
