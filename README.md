@@ -23,6 +23,7 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Multi-core SMP** — hardware-backed vCPUs via Hypervisor.framework with PSCI CPU_ON
 - **Hardware GIC** — Apple Silicon's native GICv3, not software emulation
 - **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
+- **Crash reporting** — automatic crash report on kernel panic via [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device. Captures vCPU registers, system registers, and full serial log to `/tmp/hypervisor-crash-<timestamp>.log`
 - **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
 - **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Runs in background mode (no focus stealing, no Dock icon)
 - **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
@@ -172,7 +173,9 @@ capture /tmp/result.png   # Screenshot at this point
 | `VirtualMachine.swift`  | VM creation, guest memory, ELF loader, GIC setup         |
 | `VCPU.swift`            | vCPU execution loop, MMIO dispatch, PSCI, timer handling |
 | `DTB.swift`             | Flattened Device Tree generator                          |
-| `PL011.swift`           | PL011 UART emulation (serial output)                     |
+| `PL011.swift`           | PL011 UART emulation (serial output + log buffer)        |
+| `PVPanic.swift`         | pvpanic device (QEMU pvpanic-mmio spec)                  |
+| `CrashReport.swift`     | Crash report generator (register dump + serial log)      |
 | `VirtioMMIO.swift`      | Virtio MMIO transport layer                              |
 | `VirtqueueHelper.swift` | Virtqueue descriptor chain helpers                       |
 | `Virtio9P.swift`        | 9P2000.L filesystem passthrough                          |
@@ -197,6 +200,8 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 | -------- | --------------------------------------------------------------------- |
 | RAM      | Configurable, default 256 MiB at PA `0x40000000`                      |
 | UART     | PL011 at `0x09000000` (serial I/O)                                    |
+| RTC      | PL031 at `0x09010000` (wall-clock time from host)                     |
+| pvpanic  | At `0x09020000` — write `0x01` to signal kernel panic to hypervisor   |
 | GIC      | Hardware GICv3 (distributor `0x08000000`, redistributor `0x080A0000`) |
 | Timer    | Virtual timer (host counter frequency, typically 24 MHz)              |
 | Boot     | ELF loaded at physical addresses, DTB at RAM base, PSCI for SMP       |

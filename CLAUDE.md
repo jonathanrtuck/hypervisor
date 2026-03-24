@@ -55,7 +55,9 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 
 **Display** (`AppWindow.swift`): NSWindow + CAMetalLayer + macOS input forwarding. Converts NSEvent keyboard/mouse events into Linux evdev codes for the guest.
 
-**Support**: `DTB.swift` (flattened device tree generator), `PL011.swift` (UART), `MetalProtocol.swift` (GPU command wire format enums), `EventScript.swift` (automated input injection for testing).
+**Support**: `DTB.swift` (flattened device tree generator), `PL011.swift` (UART + log buffer), `PVPanic.swift` (pvpanic-mmio device), `CrashReport.swift` (crash report writer), `MetalProtocol.swift` (GPU command wire format enums), `EventScript.swift` (automated input injection for testing).
+
+**Crash reporting**: On kernel panic, the guest writes `0x01` to the pvpanic MMIO register at `0x0902_0000` (QEMU pvpanic-mmio spec). The hypervisor captures all vCPU registers via `hv_vcpu_get_reg`/`hv_vcpu_get_sys_reg`, combines them with the PL011 serial log buffer, and writes a timestamped crash report to `/tmp/hypervisor-crash-<ts>.log`. Detection flows: pvpanic MMIO write → `VCPU.handleDataAbort` → `captureSnapshot` → `writeCrashReport` → `exit(1)`. The kernel's panic handler calls `pvpanic_signal()` then `system_off()` (PSCI) as a fallback.
 
 ### Guest Memory Map
 
@@ -64,6 +66,8 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 | `0x0800_0000`                | GIC distributor                                |
 | `0x080A_0000`                | GIC redistributor                              |
 | `0x0900_0000`                | PL011 UART                                     |
+| `0x0901_0000`                | PL031 RTC (wall-clock time)                    |
+| `0x0902_0000`                | pvpanic (paravirtual panic notification)       |
 | `0x0A00_0000 + slot * 0x200` | Virtio MMIO devices                            |
 | `0x4000_0000`                | RAM base (DTB loaded here, ELF segments above) |
 
