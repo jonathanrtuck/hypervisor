@@ -338,6 +338,13 @@ final class MetalView: NSView {
     /// Whether the guest cursor is currently visible (setCursorVisible).
     var guestCursorVisible: Bool = true
 
+    /// Transparent 1×1 cursor used when the guest hides its cursor.
+    /// macOS always composites a cursor — this makes it invisible.
+    private static let hiddenCursor: NSCursor = {
+        let img = NSImage(size: NSSize(width: 1, height: 1))
+        return NSCursor(image: img, hotSpot: .zero)
+    }()
+
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
@@ -393,6 +400,8 @@ final class MetalView: NSView {
     override func resetCursorRects() {
         if let cursor = guestCursor, guestCursorVisible {
             addCursorRect(bounds, cursor: cursor)
+        } else {
+            addCursorRect(bounds, cursor: MetalView.hiddenCursor)
         }
     }
 
@@ -401,9 +410,7 @@ final class MetalView: NSView {
         if let cursor = guestCursor, guestCursorVisible {
             cursor.set()
         } else {
-            // Hide cursor when guest says invisible — use a transparent 1x1 cursor.
-            let img = NSImage(size: NSSize(width: 1, height: 1))
-            NSCursor(image: img, hotSpot: .zero).set()
+            MetalView.hiddenCursor.set()
         }
     }
 
