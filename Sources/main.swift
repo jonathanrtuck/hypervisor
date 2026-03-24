@@ -419,12 +419,24 @@ func main() throws {
             )
         }
 
-        // Host-side cursor: update cursor position directly on the GPU
-        // backend, bypassing the virtio round-trip for zero-latency display.
-        window.onCursorPosition = { x, y in
-            guard let gpuTransport = vm.virtioDevices[3] else { return }
+        // Host-side cursor: use NSCursor for zero-latency hardware cursor plane.
+        // Guest uploads cursor image via setCursorImage → we build NSCursor from
+        // the pixels and set it on the view. WindowServer composites it at display
+        // refresh rate, completely independent of the guest's frame rate.
+        if let gpuTransport = vm.virtioDevices[3] {
             let gpuBackend = gpuTransport.backend as! VirtioMetalBackend
-            gpuBackend.updateCursorFromHost(x: x, y: y)
+            gpuBackend.onCursorImageChanged = { [weak window] cursor in
+                guard let window = window else { return }
+                window.contentView.guestCursor = cursor
+                window.contentView.updateCursor()
+                window.contentView.window?.invalidateCursorRects(for: window.contentView)
+            }
+            gpuBackend.onCursorVisibilityChanged = { [weak window] visible in
+                guard let window = window else { return }
+                window.contentView.guestCursorVisible = visible
+                window.contentView.updateCursor()
+                window.contentView.window?.invalidateCursorRects(for: window.contentView)
+            }
         }
 
         // Activate and run the application.

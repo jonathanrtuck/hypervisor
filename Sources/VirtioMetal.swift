@@ -91,6 +91,14 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     private var cursorSize: SIMD2<Float> = .zero
     private var cursorVisible: Bool = false
 
+    /// NSCursor built from guest cursor image — set on the NSView for
+    /// zero-latency hardware cursor plane compositing by WindowServer.
+    private(set) var hostCursor: NSCursor?
+    /// Fired on main thread when guest uploads a new cursor image.
+    var onCursorImageChanged: ((NSCursor) -> Void)?
+    /// Fired on main thread when guest changes cursor visibility.
+    var onCursorVisibilityChanged: ((Bool) -> Void)?
+
     // Retained frame — cursor-free scene content for cursor-only presents.
     // Emulates the persistent framebuffer of real display hardware.
     private var retainedFrame: MTLTexture?
@@ -729,6 +737,43 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 if verbose { print("VirtioMetal: cursor image \(w)×\(h) hotspot=(\(hx),\(hy))") }
             }
 
+            // Build NSCursor from BGRA pixels for hardware cursor plane.
+            // Convert BGRA → RGBA for NSBitmapImageRep (which expects RGBA).
+            let pixelCount = w * h
+            var rgba = [UInt8](repeating: 0, count: pixelCount * 4)
+            let src = (payload + 8).bindMemory(to: UInt8.self, capacity: pixelCount * 4)
+            for i in 0..<pixelCount {
+                let b = src[i * 4 + 0]
+                let g = src[i * 4 + 1]
+                let r = src[i * 4 + 2]
+                let a = src[i * 4 + 3]
+                rgba[i * 4 + 0] = r
+                rgba[i * 4 + 1] = g
+                rgba[i * 4 + 2] = b
+                rgba[i * 4 + 3] = a
+            }
+            rgba.withUnsafeMutableBufferPointer { buf in
+                guard let rep = NSBitmapImageRep(
+                    bitmapDataPlanes: nil,
+                    pixelsWide: w, pixelsHigh: h,
+                    bitsPerSample: 8, samplesPerPixel: 4,
+                    hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB,
+                    bitmapFormat: [.alphaNonpremultiplied],
+                    bytesPerRow: w * 4, bitsPerPixel: 32
+                ) else { return }
+                // Copy our RGBA data into the rep's buffer.
+                memcpy(rep.bitmapData!, buf.baseAddress!, pixelCount * 4)
+                let img = NSImage(size: NSSize(width: w, height: h))
+                img.addRepresentation(rep)
+                let hotspot = NSPoint(x: CGFloat(hx), y: CGFloat(hy))
+                let cursor = NSCursor(image: img, hotSpot: hotspot)
+                self.hostCursor = cursor
+                if let cb = self.onCursorImageChanged {
+                    DispatchQueue.main.async { cb(cursor) }
+                }
+            }
+
         case .setCursorPosition:
             guard size >= 8 else { return }
             cursorPosition.x = payload.loadUnaligned(fromByteOffset: 0, as: Float.self)
@@ -738,6 +783,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             guard size >= 1 else { return }
             let val = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             cursorVisible = val != 0
+            if let cb = self.onCursorVisibilityChanged {
+                let visible = cursorVisible
+                DispatchQueue.main.async { cb(visible) }
+            }
 
         // ── Frame control ────────────────────────────────────────────
 

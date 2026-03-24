@@ -331,8 +331,12 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
 final class MetalView: NSView {
     weak var appWindow: AppWindow?
 
-    /// Whether the native macOS cursor is currently hidden (balanced hide/unhide).
-    private var cursorHidden = false
+    /// Custom cursor from the guest (set via setCursorImage).
+    /// When set, used as the view's cursor instead of hiding the system cursor.
+    var guestCursor: NSCursor?
+
+    /// Whether the guest cursor is currently visible (setCursorVisible).
+    var guestCursorVisible: Bool = true
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -379,16 +383,27 @@ final class MetalView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        if !cursorHidden {
-            NSCursor.hide()
-            cursorHidden = true
-        }
+        updateCursor()
     }
 
     override func mouseExited(with event: NSEvent) {
-        if cursorHidden {
-            NSCursor.unhide()
-            cursorHidden = false
+        NSCursor.arrow.set()
+    }
+
+    override func resetCursorRects() {
+        if let cursor = guestCursor, guestCursorVisible {
+            addCursorRect(bounds, cursor: cursor)
+        }
+    }
+
+    /// Apply the current guest cursor state.
+    func updateCursor() {
+        if let cursor = guestCursor, guestCursorVisible {
+            cursor.set()
+        } else {
+            // Hide cursor when guest says invisible — use a transparent 1x1 cursor.
+            let img = NSImage(size: NSSize(width: 1, height: 1))
+            NSCursor(image: img, hotSpot: .zero).set()
         }
     }
 
