@@ -730,7 +730,8 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
         case .setCursorVisible:
             guard size >= 1 else { return }
-            cursorVisible = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self) != 0
+            let val = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
+            cursorVisible = val != 0
 
         // ── Frame control ────────────────────────────────────────────
 
@@ -743,17 +744,54 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let shouldCapture = captureNextFrame
                 || captureFrames.contains(frameCount)
 
-            // Composite cursor plane onto the drawable before presenting.
+            // Present frame — full or cursor-only.
+            let presentedDrawable: CAMetalDrawable?
             if let drawable = currentDrawable, let cb = currentCommandBuffer {
+                // Full frame: save cursor-free content to retained frame,
+                // then composite cursor onto the drawable.
+                ensureRetainedFrame()
+                if let retained = retainedFrame {
+                    let sz = MTLSize(width: Int(displayWidth), height: Int(displayHeight), depth: 1)
+                    let origin = MTLOrigin(x: 0, y: 0, z: 0)
+                    let blit = cb.makeBlitCommandEncoder()!
+                    blit.copy(from: drawable.texture, sourceSlice: 0, sourceLevel: 0,
+                              sourceOrigin: origin, sourceSize: sz,
+                              to: retained, destinationSlice: 0, destinationLevel: 0,
+                              destinationOrigin: origin)
+                    blit.endEncoding()
+                }
+
                 compositeCursor(onto: drawable.texture, commandBuffer: cb)
 
                 cb.present(drawable)
                 cb.commit()
                 cb.waitUntilCompleted()
+                presentedDrawable = drawable
+            } else if let retained = retainedFrame {
+                // Cursor-only frame: blit retained content to drawable,
+                // then composite cursor directly onto the drawable.
+                guard let drawable = layer.nextDrawable(),
+                      let cb = commandQueue.makeCommandBuffer() else { break }
+                let sz = MTLSize(width: Int(displayWidth), height: Int(displayHeight), depth: 1)
+                let origin = MTLOrigin(x: 0, y: 0, z: 0)
+                let blit = cb.makeBlitCommandEncoder()!
+                blit.copy(from: retained, sourceSlice: 0, sourceLevel: 0,
+                          sourceOrigin: origin, sourceSize: sz,
+                          to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
+                          destinationOrigin: origin)
+                blit.endEncoding()
+                compositeCursor(onto: drawable.texture, commandBuffer: cb)
+
+                cb.present(drawable)
+                cb.commit()
+                cb.waitUntilCompleted()
+                presentedDrawable = drawable
+            } else {
+                presentedDrawable = nil
             }
 
             // Capture AFTER the render commands have executed.
-            if shouldCapture, let drawable = currentDrawable {
+            if shouldCapture, let drawable = presentedDrawable {
                 let tex = drawable.texture
                 let desc = MTLTextureDescriptor.texture2DDescriptor(
                     pixelFormat: tex.pixelFormat,
@@ -854,6 +892,13 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         passDesc.colorAttachments[0].storeAction = .store
 
         guard let enc = cb.makeRenderCommandEncoder(descriptor: passDesc) else { return false }
+        // Explicitly set viewport to match drawable dimensions.
+        // Without this, the default viewport may be mismatched after
+        // the drawable was used as an MSAA resolve target.
+        enc.setViewport(MTLViewport(
+            originX: 0, originY: 0,
+            width: Double(drawableTex.width), height: Double(drawableTex.height),
+            znear: 0, zfar: 1))
         enc.setRenderPipelineState(pipeline)
         enc.setVertexBytes(&verts, length: MemoryLayout<SIMD4<Float>>.stride * 6, index: 0)
         enc.setFragmentTexture(curTex, index: 0)

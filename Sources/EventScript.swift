@@ -6,6 +6,7 @@
 ///     type hello world     — type each character with key press/release
 ///     key backspace        — press a single key
 ///     key shift+left       — press a modified key (modifier held)
+///     move 100 200         — move pointer to (x, y) without clicking
 ///     click 100 200        — click at (x, y) in framebuffer pixels
 ///     dblclick 100 200     — double-click at (x, y) in framebuffer pixels
 ///     wait 10              — wait 10 extra frames
@@ -191,6 +192,14 @@ class EventSchedule {
                 schedule.addActions(events, at: frame)
                 frame += delay
 
+            case .move(let x, let y):
+                let events: [FrameAction] = [
+                    .pointer(x: x, y: y),
+                    .tabletSync,
+                ]
+                schedule.addActions(events, at: frame)
+                frame += delay
+
             case .click(let x, let y):
                 let events: [FrameAction] = [
                     .pointer(x: x, y: y),
@@ -257,6 +266,7 @@ class EventSchedule {
 enum ScriptAction {
     case type(String)
     case key([String])         // ["shift", "left"] or ["backspace"]
+    case move(Float, Float)
     case click(Float, Float)
     case dblclick(Float, Float)
     case wait(Int)
@@ -296,6 +306,11 @@ func parseEventScript(_ text: String) -> [ScriptAction] {
             let keyParts = argStr.lowercased().split(separator: "+").map(String.init)
             if !keyParts.isEmpty {
                 actions.append(.key(keyParts))
+            }
+        case "move":
+            let coords = argStr.split(separator: " ")
+            if coords.count >= 2, let x = Float(coords[0]), let y = Float(coords[1]) {
+                actions.append(.move(x, y))
             }
         case "click":
             let coords = argStr.split(separator: " ")

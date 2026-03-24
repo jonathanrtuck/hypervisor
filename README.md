@@ -24,7 +24,7 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Hardware GIC** — Apple Silicon's native GICv3, not software emulation
 - **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
 - **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
-- **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names
+- **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Runs in background mode (no focus stealing, no Dock icon)
 - **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
 - **ELF loader** — loads standard ELF64 binaries, handles VA→PA entry point resolution
 - **Device tree** — generates FDT with memory, UART, GIC, PSCI, CPU, and virtio nodes
@@ -130,6 +130,7 @@ Event scripts use standard Linux evdev key names (`linux/input-event-codes.h`). 
 type hello world          # Type each character (handles shift for uppercase)
 key backspace             # Single key press
 key shift+left            # Modified key (modifiers: shift, ctrl, alt, cmd)
+move 100 200              # Move pointer to (x, y) without clicking
 click 100 200             # Left click at (x, y) in points
 dblclick 100 200          # Double click
 wait 10                   # Wait 10 extra frames

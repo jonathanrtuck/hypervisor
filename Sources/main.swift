@@ -275,11 +275,15 @@ func main() throws {
     var appWindow: AppWindow?
 
     if !config.noGpu {
-        // Create AppWindow on main thread — provides MTLDevice + CAMetalLayer
+        // Create AppWindow on main thread — provides MTLDevice + CAMetalLayer.
+        // In automated mode (--events), use .accessory policy to avoid stealing
+        // focus and appearing in the Dock. Metal rendering still works — drawables
+        // only need a non-zero drawableSize, not a visible window.
+        let automated = config.eventsFile != nil
         let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
+        app.setActivationPolicy(automated ? .accessory : .regular)
 
-        let window = AppWindow(windowed: config.windowed, resolution: config.resolution)
+        let window = AppWindow(windowed: config.windowed, resolution: config.resolution, background: automated)
         appWindow = window
 
         let backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
@@ -415,8 +419,12 @@ func main() throws {
             )
         }
 
-        // Activate and run the application
-        app.activate(ignoringOtherApps: true)
+        // Activate and run the application.
+        // In automated mode (--events), skip activation — the window exists
+        // for Metal but doesn't need to be visible or steal focus.
+        if config.eventsFile == nil {
+            app.activate(ignoringOtherApps: true)
+        }
         app.run()
     } else {
         // No GPU: run VM directly on main thread (serial-only mode)

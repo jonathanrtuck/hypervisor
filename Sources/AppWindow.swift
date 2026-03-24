@@ -44,9 +44,9 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var onKeyboardEvent: KeyboardEventCallback?
     var onTabletEvent: TabletEventCallback?
 
-    init(windowed: Bool = false, resolution: (Int, Int)? = nil) {
+    init(windowed: Bool = false, resolution: (Int, Int)? = nil, background: Bool = false) {
         self.windowed = windowed
-        self.pendingFullscreen = !windowed && resolution == nil
+        self.pendingFullscreen = !windowed && !background && resolution == nil
 
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this system")
@@ -112,7 +112,9 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.window.collectionBehavior = [.fullScreenPrimary]
         self.window.tabbingMode = .disallowed
         self.window.center()
-        self.window.makeKeyAndOrderFront(nil)
+        if !background {
+            self.window.makeKeyAndOrderFront(nil)
+        }
 
         // Accept mouse events
         self.contentView.appWindow = self
