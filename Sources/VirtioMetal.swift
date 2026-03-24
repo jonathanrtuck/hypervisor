@@ -9,6 +9,7 @@
 ///   - Queue 0 (setup): object creation (shaders, pipelines, textures)
 ///   - Queue 1 (render): per-frame command buffers (draw calls, present)
 
+import AppKit
 import Foundation
 import Hypervisor
 import Metal
@@ -42,9 +43,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     /// Tracks unknown command IDs already logged (log each ID only once).
     private var loggedUnknownCommands: Set<UInt16> = []
 
-    // Display dimensions (set from layer's drawable size at init)
+    // Display dimensions and refresh rate (set from layer/screen at init)
     var displayWidth: UInt32 = 1024
     var displayHeight: UInt32 = 768
+    var displayRefreshHz: UInt32 = 60
 
     // Frame capture state
     private(set) var frameCount: Int = 0
@@ -108,6 +110,9 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         let drawableSize = layer.drawableSize
         self.displayWidth = UInt32(drawableSize.width)
         self.displayHeight = UInt32(drawableSize.height)
+        if let screen = NSScreen.main {
+            self.displayRefreshHz = UInt32(screen.maximumFramesPerSecond)
+        }
 
         // Vertex descriptor matching the guest's Vertex struct:
         // position (float2) + texCoord (float2) + color (float4) = 32 bytes
@@ -157,6 +162,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         switch offset {
         case 0x00: return displayWidth
         case 0x04: return displayHeight
+        case 0x08: return displayRefreshHz
         default: return 0
         }
     }
