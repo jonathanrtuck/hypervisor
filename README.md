@@ -2,11 +2,11 @@
 
 A native macOS hypervisor for ARM64 bare-metal development, with Metal GPU passthrough.
 
-Built on Apple's [Hypervisor.framework](https://developer.apple.com/documentation/hypervisor), this tool boots an ARM64 ELF kernel on Apple Silicon with hardware-accelerated GPU rendering — no emulation layers, no translation.
+Built on Apple’s [Hypervisor.framework](https://developer.apple.com/documentation/hypervisor), this tool boots an ARM64 ELF kernel on Apple Silicon with hardware-accelerated GPU rendering — no emulation layers, no translation.
 
-## Why This Exists
+## why this exists
 
-If you're developing a bare-metal OS or kernel on a Mac, your options for GPU-accelerated display are limited:
+If you’re developing a bare-metal OS or kernel on a Mac, your options for GPU-accelerated display are limited:
 
 | Approach            | GPU Path                                 | Layers                   |
 | ------------------- | ---------------------------------------- | ------------------------ |
@@ -16,12 +16,12 @@ If you're developing a bare-metal OS or kernel on a Mac, your options for GPU-ac
 
 Your guest kernel sends Metal commands over a virtio device. The hypervisor replays them directly via the Metal API. No OpenGL. No Vulkan. No translation. The same GPU API on both sides.
 
-## Features
+## features
 
 - **Metal GPU passthrough** — guest sends serialized Metal commands, host replays them natively
 - **4x MSAA** — native Metal multisampling, no post-process AA
 - **Multi-core SMP** — hardware-backed vCPUs via Hypervisor.framework with PSCI CPU_ON
-- **Hardware GIC** — Apple Silicon's native GICv3, not software emulation
+- **Hardware GIC** — Apple Silicons native GICv3, not software emulation
 - **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
 - **Crash reporting** — automatic crash report on kernel panic via [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device. Captures vCPU registers, system registers, and full serial log to `/tmp/hypervisor-crash-<timestamp>.log`
 - **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
@@ -30,13 +30,13 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **ELF loader** — loads standard ELF64 binaries, handles VA→PA entry point resolution
 - **Device tree** — generates FDT with memory, UART, GIC, PSCI, CPU, and virtio nodes
 
-## Requirements
+## requirements
 
 - macOS 15+ (Sequoia) — for `hv_gic_create`
 - Apple Silicon (M1 or later)
 - Xcode Command Line Tools (for Swift compiler)
 
-## Quick Start
+## quick start
 
 ```sh
 # Clone and build
@@ -67,7 +67,7 @@ make sign
 
 The example is ~550 lines with zero dependencies — boots, initializes virtio, compiles MSL shaders, and draws a triangle via the Metal protocol. Read the source for a walkthrough of how to build a guest driver.
 
-## Usage
+## usage
 
 ```text
 hypervisor <kernel-elf> [options]
@@ -138,7 +138,7 @@ wait 10                   # Wait 10 extra frames
 capture /tmp/result.png   # Screenshot at this point
 ```
 
-## Architecture
+## architecture
 
 ```text
 ┌─────────────────────────────────────────────────────┐
@@ -192,7 +192,7 @@ capture /tmp/result.png   # Screenshot at this point
 - **Secondary vCPU threads:** Spawned via PSCI CPU_ON
 - **GPU thread:** Dedicated serial queue for Metal command processing
 
-## Guest VM Environment
+## guest VM environment
 
 Your kernel boots into a standard ARM64 `virt`-like environment:
 
@@ -216,7 +216,7 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 | 2    | virtio-input | 50        | 18        | Tablet / absolute pointer               |
 | 3    | virtio-metal | 51        | 22        | Metal GPU command passthrough           |
 
-## Virtio Device Architecture
+## virtio device architecture
 
 Each virtio backend maps one virtio device to one Apple framework. The guest always sees standard virtio; the host always sees native macOS APIs. No translation layers in between.
 
@@ -233,7 +233,7 @@ This pattern is the organizing principle for all backends, current and future. A
 
 These are not yet implemented. Slot assignments and details may change.
 
-**virtio-sound** (device ID 25) — Audio playback and capture via CoreAudio. Two virtqueues: TX for playback, RX for capture. The guest negotiates PCM stream parameters (sample rate, channels, format) via virtio-sound's standard config space. The host backend creates a CoreAudio audio unit and bridges PCM buffers. Needed for audio/video content types.
+**virtio-sound** (device ID 25) — Audio playback and capture via CoreAudio. Two virtqueues: TX for playback, RX for capture. The guest negotiates PCM stream parameters (sample rate, channels, format) via virtio-sound’s standard config space. The host backend creates a CoreAudio audio unit and bridges PCM buffers. Needed for audio/video content types.
 
 **Networking** — Options include:
 
@@ -244,7 +244,7 @@ These are not yet implemented. Slot assignments and details may change.
 
 **File drag-drop** — Drag files between host Finder and guest window. Could extend virtio-9p (the file is already accessible via the shared directory) or use a custom device that sends file metadata + path on drop events. The host side hooks `NSDraggingDestination` / `NSDraggingSource` on the AppKit window.
 
-## Metal GPU Protocol
+## metal GPU protocol
 
 The Metal passthrough protocol is a simple command stream over two virtqueues. See [`PROTOCOL.md`](PROTOCOL.md) for the full specification.
 
@@ -287,7 +287,7 @@ A minimal rendering loop:
 
 See the protocol spec for command details and payload formats.
 
-## Dependencies
+## dependencies
 
 Only Apple system frameworks — no external dependencies:
 
@@ -296,10 +296,10 @@ Only Apple system frameworks — no external dependencies:
 - **AppKit.framework** — windowing
 - **QuartzCore.framework** — CAMetalLayer
 
-## Origin
+## origin
 
-This was built for [a document-centric OS project](https://github.com/jonathanrtuck/os) exploring an operating system design where mimetypes are first-class. We needed GPU-accelerated rendering for the guest OS but found QEMU's virgl path on macOS required four translation layers (virglrenderer → ANGLE → MoltenVK → Metal) — slow, fragile, and hard to debug. So we built a native hypervisor that passes Metal commands straight through, and extracted it here for anyone with the same problem.
+This was built for [a document-centric OS project](https://github.com/jonathanrtuck/os) exploring an operating system design where mimetypes are first-class. We needed GPU-accelerated rendering for the guest OS but found QEMUs virgl path on macOS required four translation layers (virglrenderer → ANGLE → MoltenVK → Metal) — slow, fragile, and hard to debug. So we built a native hypervisor that passes Metal commands straight through, and extracted it here for anyone with the same problem.
 
-## License
+## license
 
 [Unlicense](UNLICENSE) — public domain.
