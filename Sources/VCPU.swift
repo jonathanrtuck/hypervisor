@@ -42,6 +42,8 @@ final class VCPU {
     private(set) var exitCount: UInt64 = 0
     /// True if we masked the vtimer's IMASK bit (need to unmask when timer condition clears).
     private var timerMaskedByUs = false
+    /// CNTV_CVAL at the time we masked IMASK — used to detect guest timer re-arm.
+    private var timerMaskedCval: UInt64 = 0
 
     init(vm: VirtualMachine, index: Int, entryPoint: UInt64, dtbAddress: UInt64) throws {
         self.vm = vm
@@ -129,14 +131,15 @@ final class VCPU {
         let maxExits: UInt64 = 100_000_000  // Safety limit
 
         while running && exitCount < maxExits {
-            // If we masked the vtimer, check if the guest has re-armed it
-            // (ISTATUS cleared means the timer condition no longer holds).
-            // Unmask so the next expiry generates a VTIMER exit.
+            // If we masked the vtimer, check if the guest has re-armed it.
+            // Compare CNTV_CVAL: if it changed since we masked, the guest wrote
+            // a new timer deadline. Unmask so the next expiry generates a VTIMER
+            // exit. (We can't use ISTATUS==0 as the re-arm signal because a fast
+            // timer may have already fired, setting ISTATUS=1 again.)
             if timerMaskedByUs {
-                let ctl = try getSysReg(HV_SYS_REG_CNTV_CTL_EL0)
-                let istatus = (ctl >> 2) & 1
-                if istatus == 0 {
-                    // Timer re-armed by guest — clear IMASK
+                let cval = try getSysReg(HV_SYS_REG_CNTV_CVAL_EL0)
+                if cval != timerMaskedCval {
+                    let ctl = try getSysReg(HV_SYS_REG_CNTV_CTL_EL0)
                     try setSysReg(HV_SYS_REG_CNTV_CTL_EL0, ctl & ~2)
                     timerMaskedByUs = false
                 }
@@ -240,15 +243,13 @@ final class VCPU {
 
         case 2:  // HV_EXIT_REASON_VTIMER_ACTIVATED
             // Virtual timer fired — inject IRQ to deliver timer interrupt.
-            // The GICv3 hardware maps this to PPI 27 (virtual timer INTID).
-            //
             // Mask the timer at EL2 level (IMASK bit) to prevent re-fire while
-            // the guest handles the interrupt. The guest's timer handler will
-            // re-arm the timer by writing a new CNTV_CVAL, which clears ISTATUS.
-            // We unmask before each vCPU run (see below).
+            // the guest handles the interrupt. Record CNTV_CVAL so we can detect
+            // when the guest re-arms the timer (CVAL changes = new timer set up).
             let ctl = try getSysReg(HV_SYS_REG_CNTV_CTL_EL0)
             try setSysReg(HV_SYS_REG_CNTV_CTL_EL0, ctl | 2)  // Set IMASK
             timerMaskedByUs = true
+            timerMaskedCval = try getSysReg(HV_SYS_REG_CNTV_CVAL_EL0)
 
             // Inject IRQ to the vCPU — the hardware GIC will present INTID 27
             hv_vcpu_set_pending_interrupt(vcpuId, HV_INTERRUPT_TYPE_IRQ, true)
@@ -280,10 +281,11 @@ final class VCPU {
             // Brief sleep to avoid burning host CPU while guest is idle.
             Thread.sleep(forTimeInterval: 0.001)  // 1ms
 
-            // Check if timer needs unmasking
+            // Check if timer needs unmasking (CVAL changed = guest re-armed).
             if timerMaskedByUs {
-                let ctl = try getSysReg(HV_SYS_REG_CNTV_CTL_EL0)
-                if (ctl >> 2) & 1 == 0 {
+                let cval = try getSysReg(HV_SYS_REG_CNTV_CVAL_EL0)
+                if cval != timerMaskedCval {
+                    let ctl = try getSysReg(HV_SYS_REG_CNTV_CTL_EL0)
                     try setSysReg(HV_SYS_REG_CNTV_CTL_EL0, ctl & ~2)
                     timerMaskedByUs = false
                 }
