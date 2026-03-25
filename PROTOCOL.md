@@ -75,7 +75,7 @@ Payload:
 Create a render pipeline state object.
 
 ```text
-Payload:
+Payload (17 bytes):
   u32   pipeline_handle       Guest-assigned handle
   u32   vertex_fn_handle      Handle of vertex function
   u32   fragment_fn_handle    Handle of fragment function
@@ -83,6 +83,7 @@ Payload:
   u8    color_write_mask      Bitmask: R=8, G=4, B=2, A=1 (0xF = all)
   u8    stencil_format        0 = no stencil, 1 = stencil8
   u8    sample_count           MSAA sample count (1 or 4)
+  u8    pixel_format           Color attachment format (see CREATE_TEXTURE)
 ```
 
 **Vertex layout convention:** The default vertex descriptor is:
