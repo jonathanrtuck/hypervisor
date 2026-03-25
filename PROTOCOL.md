@@ -82,8 +82,8 @@ Payload (17 bytes):
   u8    blend_enabled         1 = source-over alpha blending
   u8    color_write_mask      Bitmask: R=8, G=4, B=2, A=1 (0xF = all)
   u8    stencil_format        0 = no stencil, 1 = stencil8
-  u8    sample_count           MSAA sample count (1 or 4)
-  u8    pixel_format           Color attachment format (see CREATE_TEXTURE)
+  u8    sample_count          MSAA sample count (1 or 4)
+  u8    pixel_format          Color attachment format (see CREATE_TEXTURE)
 ```
 
 **Vertex layout convention:** The default vertex descriptor is:
