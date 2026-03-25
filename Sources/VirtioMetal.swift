@@ -315,7 +315,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             if verbose { print("VirtioMetal: function '\(name)' → \(fnHandle)") }
 
         case .createRenderPipeline:
-            guard size >= 16 else { return }
+            guard size >= 17 else {
+                print("VirtioMetal: createRenderPipeline requires 17 bytes (got \(size)) — pixel_format field is mandatory")
+                return
+            }
             let handle    = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             let vertFn    = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             let fragFn    = payload.loadUnaligned(fromByteOffset: 8, as: UInt32.self)
@@ -337,7 +340,8 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             desc.vertexFunction = vfn
             desc.fragmentFunction = ffn
             desc.vertexDescriptor = vertexDescriptor
-            desc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+            let pixFmt = payload.loadUnaligned(fromByteOffset: 16, as: UInt8.self)
+            desc.colorAttachments[0].pixelFormat = mapPixelFormat(pixFmt)
             desc.rasterSampleCount = max(1, Int(sampleCnt))
 
             if stencilFmt != 0 {
