@@ -35,6 +35,7 @@ struct Config {
     let capturePath: String
     let eventsFile: String?
     let resolution: (Int, Int)?
+    let timeout: Int?
 
     var ramSize: Int { ramMiB * 1024 * 1024 }
     let ramBase: UInt64 = 0x4000_0000
@@ -58,6 +59,7 @@ func printUsage() {
     print("  --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png")
     print("  --events FILE        Run event script (evdev input injection + captures)")
     print("  --resolution WxH     Fixed pixel resolution (e.g., 800x600)")
+    print("  --timeout SECS       Exit with code 2 if not done within SECS seconds")
     print("")
     print("Signals:")
     print("  SIGUSR1              Capture next frame to /tmp/hypervisor-capture.png")
@@ -83,6 +85,7 @@ func parseArgs() -> Config {
     var capturePath = "/tmp/hypervisor-capture.png"
     var eventsFile: String?
     var resolution: (Int, Int)?
+    var timeout: Int?
 
     var i = 1
     while i < args.count {
@@ -152,6 +155,13 @@ func parseArgs() -> Config {
             }
             eventsFile = args[i + 1]
             i += 1
+        case "--timeout":
+            guard i + 1 < args.count, let val = Int(args[i + 1]), val > 0 else {
+                print("Error: --timeout requires a positive integer (seconds)")
+                exit(1)
+            }
+            timeout = val
+            i += 1
         case "--resolution":
             guard i + 1 < args.count else {
                 print("Error: --resolution requires WxH (e.g., 800x600)")
@@ -204,7 +214,8 @@ func parseArgs() -> Config {
         captureFrames: captureFrames,
         capturePath: capturePath,
         eventsFile: eventsFile,
-        resolution: resolution
+        resolution: resolution,
+        timeout: timeout
     )
 }
 
@@ -460,6 +471,19 @@ func main() throws {
             }
         }
 
+        // Watchdog timer: exit with code 2 if the VM doesn't finish in time.
+        // Prevents infinite hangs when the kernel panics before producing
+        // frames (--capture waits forever) or deadlocks silently.
+        if let seconds = config.timeout {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .seconds(seconds)) {
+                FileHandle.standardError.write(
+                    Data("error: timeout after \(seconds)s — VM did not exit in time\n".utf8)
+                )
+                exit(2)
+            }
+            print("  Timeout: \(seconds)s")
+        }
+
         // Activate and run the application.
         // In automated mode (--events), skip activation — the window exists
         // for Metal but doesn't need to be visible or steal focus.
@@ -471,6 +495,18 @@ func main() throws {
         // No GPU: run VM directly on main thread (serial-only mode)
         print("── Booting kernel (serial mode) ──")
         print("")
+
+        // Watchdog timer for serial mode.
+        if let seconds = config.timeout {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .seconds(seconds)) {
+                FileHandle.standardError.write(
+                    Data("error: timeout after \(seconds)s — VM did not exit in time\n".utf8)
+                )
+                exit(2)
+            }
+            print("  Timeout: \(seconds)s")
+        }
+
         try vm.run(entryPoint: entry, dtbAddress: dtbAddr, cpuCount: config.cpuCount)
     }
 }

@@ -52,12 +52,15 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 | `Virtio9PBackend`    | `Virtio9P.swift`    | 9                | Foundation (FS)  |
 | `VirtioInputBackend` | `VirtioInput.swift` | 18               | AppKit (NSEvent) |
 | `VirtioMetalBackend` | `VirtioMetal.swift` | 22 (custom)      | Metal            |
+| `VirtioBlockBackend` | `VirtioBlock.swift` | 2                | Foundation (FS)  |
 
 **Display** (`AppWindow.swift`): NSWindow + CAMetalLayer + macOS input forwarding. Converts NSEvent keyboard/mouse events into Linux evdev codes for the guest.
 
 **Support**: `DTB.swift` (flattened device tree generator), `PL011.swift` (UART + log buffer), `PVPanic.swift` (pvpanic-mmio device), `CrashReport.swift` (crash report writer), `MetalProtocol.swift` (GPU command wire format enums), `EventScript.swift` (automated input injection for testing).
 
 **Crash reporting**: On kernel panic, the guest writes `0x01` to the pvpanic MMIO register at `0x0902_0000` (QEMU pvpanic-mmio spec). The hypervisor captures all vCPU registers via `hv_vcpu_get_reg`/`hv_vcpu_get_sys_reg`, combines them with the PL011 serial log buffer, and writes a timestamped crash report to `/tmp/hypervisor-crash-<ts>.log`. Detection flows: pvpanic MMIO write → `VCPU.handleDataAbort` → `captureSnapshot` → `writeCrashReport` → `exit(1)`. The kernel's panic handler calls `pvpanic_signal()` then `system_off()` (PSCI) as a fallback.
+
+**Watchdog timeout**: `--timeout SECS` schedules a GCD timer that fires `exit(2)` if the VM hasn't exited in time. Prevents infinite hangs when the kernel deadlocks (no pvpanic) or panics before virtio devices are initialized. Exit codes: 0 = success, 1 = panic, 2 = timeout.
 
 ### Guest Memory Map
 

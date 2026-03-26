@@ -27,6 +27,8 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
 - **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Runs in background mode (no focus stealing, no Dock icon)
 - **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
+- **Watchdog timeout** — `--timeout SECS` exits with code 2 if the VM doesn't finish in time. Prevents infinite hangs when a kernel deadlocks before producing frames
+- **Block device** — `--drive path.img` attaches a raw disk image as a virtio-blk device
 - **ELF loader** — loads standard ELF64 binaries, handles VA→PA entry point resolution
 - **Device tree** — generates FDT with memory, UART, GIC, PSCI, CPU, and virtio nodes
 
@@ -79,13 +81,20 @@ Options:
   --ram SIZE           RAM size in MiB (default: 256)
   --cpus N             Number of vCPUs (default: 4)
   --share DIR          9P shared directory (auto-detected if omitted)
+  --drive PATH         Disk image for virtio-blk (raw format)
   --capture N PATH     Capture frame N as PNG to PATH, then exit
   --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png, exit after last
   --events FILE        Run event script (evdev input injection + captures)
   --resolution WxH     Fixed pixel resolution (e.g., 800x600)
+  --timeout SECS       Exit with code 2 if not done within SECS seconds
 
 Signals:
   SIGUSR1              Capture next frame to /tmp/hypervisor-capture.png
+
+Exit codes:
+  0                    Success (normal exit or capture completed)
+  1                    Kernel panic (pvpanic signal received)
+  2                    Timeout (--timeout deadline exceeded)
 ```
 
 ### Examples
@@ -121,6 +130,12 @@ SCRIPT
 
 # Fixed resolution for deterministic display dimensions
 .build/debug/hypervisor kernel.elf --resolution 800x600 --events /tmp/test.events
+
+# Boot with a disk image (virtio-blk)
+.build/debug/hypervisor kernel.elf --drive rootfs.img
+
+# Capture with a 30-second timeout (exit 2 if kernel hangs)
+.build/debug/hypervisor kernel.elf --capture 30 /tmp/out.png --timeout 30
 ```
 
 ### Event Script Format
@@ -181,6 +196,7 @@ capture /tmp/result.png   # Screenshot at this point
 | `Virtio9P.swift`        | 9P2000.L filesystem passthrough                          |
 | `VirtioInput.swift`     | Keyboard and tablet input devices                        |
 | `VirtioMetal.swift`     | Metal command passthrough (deserialize + replay)         |
+| `VirtioBlock.swift`     | File-backed block device (virtio-blk)                    |
 | `MetalProtocol.swift`   | Metal command wire format definitions                    |
 | `EventScript.swift`     | Event script parser + scheduler (evdev key names)        |
 | `AppWindow.swift`       | NSWindow + CAMetalLayer + macOS input forwarding         |
@@ -215,6 +231,7 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 | 1    | virtio-input | 49        | 18        | Keyboard (evdev)                        |
 | 2    | virtio-input | 50        | 18        | Tablet / absolute pointer               |
 | 3    | virtio-metal | 51        | 22        | Metal GPU command passthrough           |
+| 4    | virtio-blk   | 52        | 2         | Block device (if `--drive` provided)    |
 
 ## virtio device architecture
 
@@ -226,6 +243,7 @@ Each virtio backend maps one virtio device to one Apple framework. The guest alw
 | `VirtioInput` | Input (keyboard) | AppKit          | evdev key events     | NSEvent key events        |
 | `VirtioInput` | Input (tablet)   | AppKit          | evdev abs events     | NSEvent mouse tracking    |
 | `VirtioMetal` | GPU (device 22)  | Metal           | Metal command stream | MTLDevice/MTLCommandQueue |
+| `VirtioBlock` | Block (device 2) | Foundation (FS) | virtio-blk protocol  | File-backed read/write    |
 
 This pattern is the organizing principle for all backends, current and future. Adding a new backend means: pick a virtio device type (standard or custom), write a Swift class that translates between virtio virtqueues and the corresponding Apple framework, register it at a slot in `main.swift`.
 
