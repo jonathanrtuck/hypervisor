@@ -9,6 +9,7 @@
 ///   1: virtio-input (keyboard)
 ///   2: virtio-input (tablet / absolute pointer)
 ///   3: virtio-metal (Metal command passthrough — device ID 22)
+///   4: virtio-blk  (file-backed block device, optional)
 
 import Foundation
 import AppKit
@@ -29,6 +30,7 @@ struct Config {
     let ramMiB: Int
     let cpuCount: Int
     let shareDir: String?
+    let drivePath: String?
     let captureFrames: Set<Int>
     let capturePath: String
     let eventsFile: String?
@@ -51,6 +53,7 @@ func printUsage() {
     print("  --ram SIZE           RAM size in MiB (default: 256)")
     print("  --cpus N             Number of vCPUs (default: 4)")
     print("  --share DIR          9P shared directory (auto-detected if omitted)")
+    print("  --drive PATH         Disk image for virtio-blk (raw format)")
     print("  --capture N PATH     Capture frame N as PNG to PATH, then exit")
     print("  --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png")
     print("  --events FILE        Run event script (evdev input injection + captures)")
@@ -75,6 +78,7 @@ func parseArgs() -> Config {
     var ramMiB = 256
     var cpuCount = 4
     var shareDir: String?
+    var drivePath: String?
     var captureFrames: Set<Int> = []
     var capturePath = "/tmp/hypervisor-capture.png"
     var eventsFile: String?
@@ -111,6 +115,13 @@ func parseArgs() -> Config {
                 exit(1)
             }
             shareDir = args[i + 1]
+            i += 1
+        case "--drive":
+            guard i + 1 < args.count else {
+                print("Error: --drive requires a file path")
+                exit(1)
+            }
+            drivePath = args[i + 1]
             i += 1
         case "--capture":
             guard i + 2 < args.count else {
@@ -189,6 +200,7 @@ func parseArgs() -> Config {
         ramMiB: ramMiB,
         cpuCount: cpuCount,
         shareDir: shareDir,
+        drivePath: drivePath,
         captureFrames: captureFrames,
         capturePath: capturePath,
         eventsFile: eventsFile,
@@ -272,6 +284,13 @@ func main() throws {
     // Slot 2: virtio-input tablet
     let tablet = VirtioInputBackend(name: "virtio-tablet", keyboard: false)
     vm.addVirtioDevice(slot: 2, backend: tablet)
+
+    // Slot 4: virtio-blk (optional — only if drive image is provided)
+    if let path = config.drivePath {
+        let block = try VirtioBlockBackend(imagePath: path)
+        vm.addVirtioDevice(slot: 4, backend: block)
+        print("  Block device: \(path) (\(block.deviceId == 2 ? "virtio-blk" : "?"))")
+    }
 
     // Slot 3: Metal GPU (if GPU mode)
     var appWindow: AppWindow?
