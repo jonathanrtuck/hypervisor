@@ -315,8 +315,9 @@ func main() throws {
     if !config.noGpu {
         // Create AppWindow on main thread — provides MTLDevice + CAMetalLayer.
         // In background mode (--background), use .accessory policy to avoid
-        // stealing focus and appearing in the Dock. The window is ordered behind
-        // other windows so CAMetalLayer.nextDrawable() still works.
+        // stealing focus and appearing in the Dock. The window is ordered
+        // behind other windows with zero alpha so it's invisible but still
+        // in the compositing tree (required for nextDrawable()).
         let bg = config.background
         let app = NSApplication.shared
         app.setActivationPolicy(bg ? .accessory : .regular)

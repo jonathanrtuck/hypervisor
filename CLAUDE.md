@@ -17,7 +17,25 @@ make clean          # swift package clean
 
 The `com.apple.security.hypervisor` entitlement (in `hypervisor.entitlements`) is required. Always `make sign` after building — unsigned binaries will crash on `hv_vm_create`.
 
-There are no tests. There is no linter configuration.
+There are no unit tests or linter configuration.
+
+## Verification
+
+Use the hello-triangle example as a smoke test after any change that touches rendering, windowing, or the virtio-metal pipeline. The kernel renders **exactly one frame** then idles — always capture frame 0.
+
+```sh
+# Background (no visible window, no focus steal):
+make run KERNEL=examples/hello-triangle/target/aarch64-unknown-none/release/hello-triangle \
+  ARGS="--background --capture 0 /tmp/test.png --timeout 10"
+
+# Foreground (windowed, for visual inspection):
+make run KERNEL=examples/hello-triangle/target/aarch64-unknown-none/release/hello-triangle \
+  ARGS="--windowed --capture 0 /tmp/test.png --timeout 10"
+```
+
+Compare background vs foreground captures with `shasum -a 256` to verify pixel-identical output. Expected: RGB gradient triangle on a dark background (top-left quadrant), rest white/uninitialized.
+
+If the kernel needs rebuilding: `cd examples/hello-triangle && cargo build --release`
 
 ## Architecture
 
@@ -61,7 +79,7 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 
 **Crash reporting**: On kernel panic, the guest writes `0x01` to the pvpanic MMIO register at `0x0902_0000` (QEMU pvpanic-mmio spec). The hypervisor captures all vCPU registers via `hv_vcpu_get_reg`/`hv_vcpu_get_sys_reg`, combines them with the PL011 serial log buffer, and writes a timestamped crash report to `/tmp/hypervisor-crash-<ts>.log`. Detection flows: pvpanic MMIO write → `VCPU.handleDataAbort` → `captureSnapshot` → `writeCrashReport` → `exit(1)`. The kernel's panic handler calls `pvpanic_signal()` then `system_off()` (PSCI) as a fallback.
 
-**Background mode**: `--background` uses `.accessory` activation policy (no Dock icon), orders the window behind others via `orderBack`, and skips `app.activate`. Metal rendering still works because the window remains in the compositing tree. Designed for CI pipelines and automated captures. Note: `--events` does **not** imply background mode — pass `--background` explicitly.
+**Background mode**: `--background` uses `.accessory` activation policy (no Dock icon), sets `window.alphaValue = 0` (fully transparent), orders the window behind others via `orderBack`, and skips `app.activate`. The window must be in the compositing tree for `nextDrawable()` to work (IOSurface-backed drawables are managed by the window server), but the zero alpha makes it invisible. Designed for CI pipelines and automated captures. Note: `--events` does **not** imply background mode — pass `--background` explicitly.
 
 **Watchdog timeout**: `--timeout SECS` schedules a GCD timer that fires `exit(2)` if the VM hasn't exited in time. Prevents infinite hangs when the kernel deadlocks (no pvpanic) or panics before virtio devices are initialized. Exit codes: 0 = success, 1 = panic, 2 = timeout.
 
