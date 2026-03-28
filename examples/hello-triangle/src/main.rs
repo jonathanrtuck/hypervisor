@@ -423,8 +423,9 @@ impl<'a> CmdEncoder<'a> {
         vertex_fn: u32,
         fragment_fn: u32,
         sample_count: u8,
+        pixel_format: u8,
     ) {
-        self.header(0x0010, 16);
+        self.header(0x0010, 17);
         self.push_u32(handle);
         self.push_u32(vertex_fn);
         self.push_u32(fragment_fn);
@@ -432,6 +433,7 @@ impl<'a> CmdEncoder<'a> {
         self.push_u8(0xF); // color_write_mask = all
         self.push_u8(0); // stencil_format = none
         self.push_u8(sample_count);
+        self.push_u8(pixel_format);
     }
 
     fn create_texture(
@@ -616,7 +618,8 @@ pub extern "C" fn main() {
         enc.create_texture(TEX_MSAA, DISPLAY_W, DISPLAY_H, 1, SAMPLE_COUNT, 4);
 
         // 4. Create render pipeline with 4x MSAA
-        enc.create_render_pipeline(PIPE_SOLID, FN_VERTEX, FN_FRAGMENT, SAMPLE_COUNT);
+        //    pixel_format=1 (BGRA8Unorm) — must match the resolve texture format
+        enc.create_render_pipeline(PIPE_SOLID, FN_VERTEX, FN_FRAGMENT, SAMPLE_COUNT, 1);
 
         enc.len()
     };

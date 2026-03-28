@@ -27,6 +27,7 @@ struct Config {
     let verbose: Bool
     let noGpu: Bool
     let windowed: Bool
+    let background: Bool
     let ramMiB: Int
     let cpuCount: Int
     let shareDir: String?
@@ -51,6 +52,7 @@ func printUsage() {
     print("  --verbose            Enable verbose logging")
     print("  --no-gpu             Boot without GPU (serial only, no window)")
     print("  --windowed           Run in a window instead of fullscreen")
+    print("  --background         No visible window, no focus steal (for automated captures)")
     print("  --ram SIZE           RAM size in MiB (default: 256)")
     print("  --cpus N             Number of vCPUs (default: 4)")
     print("  --share DIR          9P shared directory (auto-detected if omitted)")
@@ -77,6 +79,7 @@ func parseArgs() -> Config {
     var verbose = false
     var noGpu = false
     var windowed = false
+    var background = false
     var ramMiB = 256
     var cpuCount = 4
     var shareDir: String?
@@ -98,6 +101,8 @@ func parseArgs() -> Config {
             noGpu = true
         case "--windowed":
             windowed = true
+        case "--background":
+            background = true
         case "--ram":
             guard i + 1 < args.count, let val = Int(args[i + 1]), val > 0 else {
                 print("Error: --ram requires a positive integer (MiB)")
@@ -207,6 +212,7 @@ func parseArgs() -> Config {
         verbose: verbose,
         noGpu: noGpu,
         windowed: windowed,
+        background: background,
         ramMiB: ramMiB,
         cpuCount: cpuCount,
         shareDir: shareDir,
@@ -308,14 +314,14 @@ func main() throws {
 
     if !config.noGpu {
         // Create AppWindow on main thread — provides MTLDevice + CAMetalLayer.
-        // In automated mode (--events), use .accessory policy to avoid stealing
-        // focus and appearing in the Dock. Metal rendering still works — drawables
-        // only need a non-zero drawableSize, not a visible window.
-        let automated = config.eventsFile != nil
+        // In background mode (--background), use .accessory policy to avoid
+        // stealing focus and appearing in the Dock. The window is ordered behind
+        // other windows so CAMetalLayer.nextDrawable() still works.
+        let bg = config.background
         let app = NSApplication.shared
-        app.setActivationPolicy(automated ? .accessory : .regular)
+        app.setActivationPolicy(bg ? .accessory : .regular)
 
-        let window = AppWindow(windowed: config.windowed, resolution: config.resolution, background: automated)
+        let window = AppWindow(windowed: config.windowed, resolution: config.resolution, background: bg)
         appWindow = window
 
         let backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
@@ -485,9 +491,9 @@ func main() throws {
         }
 
         // Activate and run the application.
-        // In automated mode (--events), skip activation — the window exists
-        // for Metal but doesn't need to be visible or steal focus.
-        if config.eventsFile == nil {
+        // In background mode, skip activation — the window exists for Metal
+        // but doesn't need to be visible or steal focus.
+        if !config.background {
             app.activate(ignoringOtherApps: true)
         }
         app.run()

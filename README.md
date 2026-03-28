@@ -25,7 +25,8 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
 - **Crash reporting** — automatic crash report on kernel panic via [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device. Captures vCPU registers, system registers, and full serial log to `/tmp/hypervisor-crash-<timestamp>.log`
 - **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
-- **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Runs in background mode (no focus stealing, no Dock icon)
+- **Background mode** — `--background` hides the window and suppresses Dock icon / focus stealing. Metal rendering still works (the window exists in the compositing tree but ordered behind). Designed for CI pipelines and automated captures
+- **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Combine with `--background` for headless operation
 - **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
 - **Watchdog timeout** — `--timeout SECS` exits with code 2 if the VM doesn't finish in time. Prevents infinite hangs when a kernel deadlocks before producing frames
 - **Block device** — `--drive path.img` attaches a raw disk image as a virtio-blk device
@@ -64,8 +65,10 @@ cd examples/hello-triangle
 cargo build --release
 cd ../..
 make sign
-.build/debug/hypervisor examples/hello-triangle/target/aarch64-unknown-none/release/hello-triangle
+.build/debug/hypervisor examples/hello-triangle/target/aarch64-unknown-none/release/hello-triangle --windowed
 ```
+
+The example renders at a fixed 1024x768 viewport, so `--windowed` keeps it properly framed. In fullscreen the triangle appears in the top-left corner of the display.
 
 The example is ~550 lines with zero dependencies — boots, initializes virtio, compiles MSL shaders, and draws a triangle via the Metal protocol. Read the source for a walkthrough of how to build a guest driver.
 
@@ -78,6 +81,7 @@ Options:
   --verbose            Enable verbose logging
   --no-gpu             Boot without GPU (serial only, no window)
   --windowed           Run in a window instead of fullscreen
+  --background         No visible window, no focus steal (for CI / automated captures)
   --ram SIZE           RAM size in MiB (default: 256)
   --cpus N             Number of vCPUs (default: 4)
   --share DIR          9P shared directory (auto-detected if omitted)
@@ -119,17 +123,20 @@ Exit codes:
 .build/debug/hypervisor kernel.elf --capture 10,30,60 /tmp/anim.png
 # Produces /tmp/anim-010.png, /tmp/anim-030.png, /tmp/anim-060.png
 
-# Run an event script (type text, edit, capture result)
+# Background mode — Metal renders but no window/Dock icon appears
+.build/debug/hypervisor kernel.elf --background --capture 5 /tmp/screenshot.png
+
+# Run an event script in background mode (headless CI)
 cat > /tmp/test.events << 'SCRIPT'
 type hello world
 key backspace
 wait 5
 capture /tmp/result.png
 SCRIPT
-.build/debug/hypervisor kernel.elf --events /tmp/test.events
+.build/debug/hypervisor kernel.elf --background --events /tmp/test.events
 
 # Fixed resolution for deterministic display dimensions
-.build/debug/hypervisor kernel.elf --resolution 800x600 --events /tmp/test.events
+.build/debug/hypervisor kernel.elf --background --resolution 800x600 --events /tmp/test.events
 
 # Boot with a disk image (virtio-blk)
 .build/debug/hypervisor kernel.elf --drive rootfs.img

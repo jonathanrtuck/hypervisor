@@ -9,6 +9,7 @@ make build          # swift build
 make sign           # build + codesign with hypervisor entitlement
 make run KERNEL=path/to/kernel.elf          # sign + run
 make run KERNEL=path/to/kernel.elf ARGS="--windowed --verbose"
+make run KERNEL=path/to/kernel.elf ARGS="--background --capture 5 /tmp/out.png"  # headless capture
 make run-verbose KERNEL=path/to/kernel.elf  # with --verbose
 make run-serial KERNEL=path/to/kernel.elf   # --no-gpu (no window)
 make clean          # swift package clean
@@ -59,6 +60,8 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 **Support**: `DTB.swift` (flattened device tree generator), `PL011.swift` (UART + log buffer), `PVPanic.swift` (pvpanic-mmio device), `CrashReport.swift` (crash report writer), `MetalProtocol.swift` (GPU command wire format enums), `EventScript.swift` (automated input injection for testing).
 
 **Crash reporting**: On kernel panic, the guest writes `0x01` to the pvpanic MMIO register at `0x0902_0000` (QEMU pvpanic-mmio spec). The hypervisor captures all vCPU registers via `hv_vcpu_get_reg`/`hv_vcpu_get_sys_reg`, combines them with the PL011 serial log buffer, and writes a timestamped crash report to `/tmp/hypervisor-crash-<ts>.log`. Detection flows: pvpanic MMIO write → `VCPU.handleDataAbort` → `captureSnapshot` → `writeCrashReport` → `exit(1)`. The kernel's panic handler calls `pvpanic_signal()` then `system_off()` (PSCI) as a fallback.
+
+**Background mode**: `--background` uses `.accessory` activation policy (no Dock icon), orders the window behind others via `orderBack`, and skips `app.activate`. Metal rendering still works because the window remains in the compositing tree. Designed for CI pipelines and automated captures. Note: `--events` does **not** imply background mode — pass `--background` explicitly.
 
 **Watchdog timeout**: `--timeout SECS` schedules a GCD timer that fires `exit(2)` if the VM hasn't exited in time. Prevents infinite hangs when the kernel deadlocks (no pvpanic) or panics before virtio devices are initialized. Exit codes: 0 = success, 1 = panic, 2 = timeout.
 

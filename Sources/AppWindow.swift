@@ -117,6 +117,11 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.window.center()
         if !background {
             self.window.makeKeyAndOrderFront(nil)
+        } else {
+            // Order behind other windows so CAMetalLayer.nextDrawable() works
+            // (requires the window to be in the compositing tree) without
+            // stealing focus or appearing in front of user's work.
+            self.window.orderBack(nil)
         }
 
         // Accept mouse events

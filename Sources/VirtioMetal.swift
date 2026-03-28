@@ -79,6 +79,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     // Per-frame state (reset each frame)
     private var currentCommandBuffer: MTLCommandBuffer?
     private var currentRenderEncoder: MTLRenderCommandEncoder?
+    private var pipelineStateSet: Bool = false
     private var currentComputeEncoder: MTLComputeCommandEncoder?
     private var currentBlitEncoder: MTLBlitCommandEncoder?
     private var currentDrawable: CAMetalDrawable?
@@ -559,12 +560,16 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         case .endRenderPass:
             currentRenderEncoder?.endEncoding()
             currentRenderEncoder = nil
+            pipelineStateSet = false
 
         case .setRenderPipeline:
             guard size >= 4 else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             if let pipeline = renderPipelines[handle] {
                 currentRenderEncoder?.setRenderPipelineState(pipeline)
+                pipelineStateSet = true
+            } else {
+                print("VirtioMetal: setRenderPipeline — handle \(handle) not found (pipeline not created?)")
             }
 
         case .setDepthStencilState:
@@ -620,6 +625,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
         case .drawPrimitives:
             guard size >= 12 else { return }
+            guard pipelineStateSet else {
+                print("VirtioMetal: drawPrimitives called without a render pipeline state — skipping (would crash Metal driver)")
+                return
+            }
             let primType = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             let vertStart = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             let vertCount = payload.loadUnaligned(fromByteOffset: 8, as: UInt32.self)
