@@ -202,6 +202,10 @@ enum MetalRenderCommand: UInt16 {
     /// Show or hide the cursor plane.
     /// Payload: [u8 visible]
     case setCursorVisible     = 0x0F12
+
+    /// Set cursor from a GPU texture handle (no pixel readback to guest).
+    /// Payload: [u32 texture_handle] [u16 width] [u16 height] [i16 hotspot_x] [i16 hotspot_y]
+    case setCursorFromTexture = 0x0F13
 }
 
 // MARK: - Pixel format mapping

@@ -452,6 +452,27 @@ Payload:
 
 When hidden, the cursor plane is not composited. The guest should hide the cursor on keyboard input and show it on mouse movement.
 
+#### `SET_CURSOR_FROM_TEXTURE` (0x0F13)
+
+Set the cursor image from a GPU texture handle (zero-copy path).
+
+```text
+Payload:
+  u32   texture_handle    Handle of a texture containing the cursor image (BGRA)
+  u16   width             Cursor width in pixels
+  u16   height            Cursor height in pixels
+  i16   hotspot_x         Hotspot X offset in image pixels
+  i16   hotspot_y         Hotspot Y offset in image pixels
+```
+
+Like `SET_CURSOR_IMAGE`, but the host reads cursor pixels directly from the named GPU texture instead of receiving pixel data inline. The host encodes a blit on the current command buffer; the actual pixel readback is deferred to after the next `PRESENT_AND_COMMIT` completes (when GPU work is guaranteed finished).
+
+This is the preferred path when the guest renders the cursor to a GPU texture (e.g., via stencil-then-cover path rendering). It avoids a GPU→CPU→GPU round trip — the guest never reads the pixels back.
+
+### Cursor Plane and Captures
+
+When `--capture` or `SIGUSR1` triggers a screenshot, the host always composites the cursor onto the captured image, regardless of whether the live display uses GPU compositing or an `NSCursor` overlay. This ensures captures accurately reflect the cursor state for automated visual testing. The compositing is done on a staging copy — the live display is unaffected.
+
 ## Enumerations
 
 ### Pixel Format

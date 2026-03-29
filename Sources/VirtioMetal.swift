@@ -96,6 +96,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     /// zero-latency hardware cursor plane compositing by WindowServer.
     /// When set, GPU compositeCursor() is skipped (NSCursor takes precedence).
     private(set) var hostCursor: NSCursor?
+
+    /// Pending cursor readback — blit is encoded on currentCommandBuffer,
+    /// pixel readback deferred to after presentAndCommit's waitUntilCompleted.
+    private var pendingCursorReadback: (buffer: MTLBuffer, w: Int, h: Int, hotX: Int, hotY: Int)?
     /// Fired on main thread when guest uploads a new cursor image.
     var onCursorImageChanged: ((NSCursor) -> Void)?
     /// Fired on main thread when guest changes cursor visibility.
@@ -805,6 +809,43 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 DispatchQueue.main.async { cb(visible) }
             }
 
+        case .setCursorFromTexture:
+            guard size >= 12 else { return }
+            let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
+            let w = Int(payload.loadUnaligned(fromByteOffset: 4, as: UInt16.self))
+            let h = Int(payload.loadUnaligned(fromByteOffset: 6, as: UInt16.self))
+            let hotX = Int(payload.loadUnaligned(fromByteOffset: 8, as: Int16.self))
+            let hotY = Int(payload.loadUnaligned(fromByteOffset: 10, as: Int16.self))
+            guard w > 0, h > 0, w <= 256, h <= 256,
+                  let tex = textures[handle] else { return }
+
+            // Encode the blit on the CURRENT command buffer (after the cursor
+            // render passes that wrote to the texture). The actual pixel
+            // readback is deferred to presentAndCommit, after the GPU finishes.
+            currentRenderEncoder?.endEncoding()
+            currentRenderEncoder = nil
+
+            let bytesPerRow = w * 4
+            let totalBytes = bytesPerRow * h
+            guard let readBuf = device.makeBuffer(length: totalBytes, options: .storageModeShared)
+            else { return }
+
+            if currentCommandBuffer == nil {
+                currentCommandBuffer = commandQueue.makeCommandBuffer()
+            }
+            guard let blit = currentCommandBuffer?.makeBlitCommandEncoder() else { return }
+            blit.copy(from: tex, sourceSlice: 0, sourceLevel: 0,
+                      sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: MTLSize(width: w, height: h, depth: 1),
+                      to: readBuf, destinationOffset: 0,
+                      destinationBytesPerRow: bytesPerRow,
+                      destinationBytesPerImage: totalBytes)
+            blit.endEncoding()
+
+            cursorHotspot = SIMD2<Float>(Float(hotX), Float(hotY))
+            cursorSize = SIMD2<Float>(Float(w), Float(h))
+            pendingCursorReadback = (readBuf, w, h, hotX, hotY)
+
         // ── Frame control ────────────────────────────────────────────
 
         case .presentAndCommit:
@@ -868,6 +909,60 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 presentedDrawable = nil
             }
 
+            // Process pending cursor readback now that GPU work has completed.
+            if let pending = pendingCursorReadback {
+                let (readBuf, w, h, hotX, hotY) = pending
+                pendingCursorReadback = nil
+
+                let bytesPerRow = w * 4
+                let pixelCount = w * h
+                let bgra = UnsafeBufferPointer(
+                    start: readBuf.contents().bindMemory(to: UInt8.self, capacity: pixelCount * 4),
+                    count: pixelCount * 4)
+
+                // Update GPU cursor texture for compositing fallback.
+                let desc = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .bgra8Unorm_srgb, width: w, height: h, mipmapped: false)
+                desc.usage = [.shaderRead]
+                desc.storageMode = .shared
+                if let ct = device.makeTexture(descriptor: desc) {
+                    ct.replace(region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                                 size: MTLSize(width: w, height: h, depth: 1)),
+                               mipmapLevel: 0, withBytes: bgra.baseAddress!, bytesPerRow: bytesPerRow)
+                    cursorTexture = ct
+                }
+
+                // Build NSCursor from BGRA pixels.
+                var rgba = [UInt8](repeating: 0, count: pixelCount * 4)
+                for i in 0..<pixelCount {
+                    rgba[i * 4 + 0] = bgra[i * 4 + 2] // R
+                    rgba[i * 4 + 1] = bgra[i * 4 + 1] // G
+                    rgba[i * 4 + 2] = bgra[i * 4 + 0] // B
+                    rgba[i * 4 + 3] = bgra[i * 4 + 3] // A
+                }
+                rgba.withUnsafeMutableBytes { buf in
+                    guard let rep = NSBitmapImageRep(
+                        bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                        isPlanar: false, colorSpaceName: .deviceRGB,
+                        bitmapFormat: [.alphaNonpremultiplied],
+                        bytesPerRow: bytesPerRow, bitsPerPixel: 32
+                    ) else { return }
+                    memcpy(rep.bitmapData!, buf.baseAddress!, pixelCount * 4)
+                    let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+                    let img = NSImage(size: NSSize(width: CGFloat(w) / scale,
+                                                   height: CGFloat(h) / scale))
+                    img.addRepresentation(rep)
+                    let hotspot = NSPoint(x: CGFloat(hotX) / scale,
+                                          y: CGFloat(hotY) / scale)
+                    let cursor = NSCursor(image: img, hotSpot: hotspot)
+                    self.hostCursor = cursor
+                    if let cb = self.onCursorImageChanged {
+                        DispatchQueue.main.async { cb(cursor) }
+                    }
+                }
+            }
+
             // Capture AFTER the render commands have executed.
             if shouldCapture, let drawable = presentedDrawable {
                 let tex = drawable.texture
@@ -876,7 +971,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                     width: tex.width, height: tex.height,
                     mipmapped: false)
                 desc.storageMode = .shared
-                desc.usage = []
+                desc.usage = [.shaderRead, .renderTarget]
                 if let staging = device.makeTexture(descriptor: desc) {
                     let cb = commandQueue.makeCommandBuffer()!
                     let blit = cb.makeBlitCommandEncoder()!
@@ -886,6 +981,12 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                               to: staging, destinationSlice: 0, destinationLevel: 0,
                               destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
                     blit.endEncoding()
+
+                    // Always composite cursor into captures, even when NSCursor
+                    // is active.  The staging texture is a separate copy — the
+                    // displayed frame is unaffected.
+                    compositeCursor(onto: staging, commandBuffer: cb)
+
                     cb.commit()
                     cb.waitUntilCompleted()
 

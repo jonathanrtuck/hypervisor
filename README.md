@@ -24,7 +24,7 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Hardware GIC** — Apple Silicons native GICv3, not software emulation
 - **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
 - **Crash reporting** — automatic crash report on kernel panic via [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device. Captures vCPU registers, system registers, and full serial log to `/tmp/hypervisor-crash-<timestamp>.log`
-- **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc
+- **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc. Captures always include the cursor plane composite for accurate visual testing
 - **Background mode** — `--background` hides the window and suppresses Dock icon / focus stealing. Metal rendering still works (the window exists in the compositing tree but ordered behind). Designed for CI pipelines and automated captures
 - **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Combine with `--background` for headless operation
 - **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
