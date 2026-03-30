@@ -313,19 +313,33 @@ func main() throws {
     var appWindow: AppWindow?
 
     if !config.noGpu {
-        // Create AppWindow on main thread — provides MTLDevice + CAMetalLayer.
-        // In background mode (--background), use .accessory policy to avoid
-        // stealing focus and appearing in the Dock. The window is ordered
-        // behind other windows with zero alpha so it's invisible but still
-        // in the compositing tree (required for nextDrawable()).
         let bg = config.background
-        let app = NSApplication.shared
-        app.setActivationPolicy(bg ? .accessory : .regular)
+        let backend: VirtioMetalBackend
 
-        let window = AppWindow(windowed: config.windowed, resolution: config.resolution, background: bg)
-        appWindow = window
+        if bg {
+            // Headless mode: render to an offscreen texture. No window, no
+            // CAMetalLayer, no interaction with the macOS window server.
+            guard let device = MTLCreateSystemDefaultDevice() else {
+                fatalError("Metal is not supported on this system")
+            }
+            let screen = NSScreen.main ?? NSScreen.screens[0]
+            let sf = screen.backingScaleFactor
+            let (w, h): (Int, Int)
+            if let res = config.resolution {
+                (w, h) = res
+            } else {
+                (w, h) = (Int(screen.frame.width * sf), Int(screen.frame.height * sf))
+            }
+            backend = VirtioMetalBackend(device: device, width: w, height: h)
+        } else {
+            // Windowed mode: create AppWindow with CAMetalLayer.
+            let app = NSApplication.shared
+            app.setActivationPolicy(.regular)
+            let window = AppWindow(windowed: config.windowed, resolution: config.resolution, background: false)
+            appWindow = window
+            backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
+        }
 
-        let backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
         backend.verbose = config.verbose
         backend.captureFrames = config.captureFrames
         backend.capturePath = config.capturePath
@@ -351,9 +365,9 @@ func main() throws {
             }
 
             // Wire onFrame callback: inject keyboard/tablet events at scheduled frames.
-            // Use drawableSize (pixels) not bounds (points) — event script coordinates
-            // match --resolution (pixel dimensions), not the window's point size.
-            let fbSize = window.metalLayer.drawableSize
+            // Use display size (pixels) — event script coordinates match --resolution.
+            let fbSize = CGSize(width: CGFloat(backend.displayWidth),
+                                height: CGFloat(backend.displayHeight))
             backend.onFrame = { [weak vm] frame in
                 guard let vm = vm else { return }
                 let events = schedule.actionsForFrame(frame)

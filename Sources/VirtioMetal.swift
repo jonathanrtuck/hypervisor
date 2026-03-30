@@ -62,7 +62,12 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     // Metal state
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
-    private let layer: CAMetalLayer
+    private let layer: CAMetalLayer?
+
+    /// Offscreen drawable texture for headless (background) mode.
+    /// When set, DRAWABLE_HANDLE resolves to this texture instead of
+    /// layer.nextDrawable(). No window or CAMetalLayer needed.
+    private var offscreenDrawable: MTLTexture?
 
     // Handle table: guest u32 IDs → host Metal objects
     private var libraries: [UInt32: MTLLibrary] = [:]
@@ -83,6 +88,9 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     private var currentComputeEncoder: MTLComputeCommandEncoder?
     private var currentBlitEncoder: MTLBlitCommandEncoder?
     private var currentDrawable: CAMetalDrawable?
+    /// In offscreen mode, tracks whether we've "acquired" the offscreen
+    /// texture this frame (mirrors currentDrawable for the layer path).
+    private var offscreenAcquired: Bool = false
 
     // Cursor plane — composited after guest content, before present
     private var cursorTexture: MTLTexture?
@@ -168,6 +176,76 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         }
 
         print("VirtioMetal: initialized (\(displayWidth)×\(displayHeight))")
+    }
+
+    /// Headless init — no window, no CAMetalLayer. Renders to an offscreen
+    /// texture. Used for automated captures (--background) to avoid any
+    /// interaction with the macOS window server.
+    init(device: MTLDevice, width: Int, height: Int) {
+        self.device = device
+        self.commandQueue = device.makeCommandQueue()!
+        self.layer = nil
+        self.displayWidth = UInt32(width)
+        self.displayHeight = UInt32(height)
+        if let screen = NSScreen.main {
+            self.displayRefreshHz = UInt32(screen.maximumFramesPerSecond)
+        }
+
+        // Create the offscreen drawable texture.
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: width, height: height, mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead, .shaderWrite]
+        desc.storageMode = .private
+        self.offscreenDrawable = device.makeTexture(descriptor: desc)
+
+        let vd = MTLVertexDescriptor()
+        vd.attributes[0].format = .float2; vd.attributes[0].offset = 0;  vd.attributes[0].bufferIndex = 0
+        vd.attributes[1].format = .float2; vd.attributes[1].offset = 8;  vd.attributes[1].bufferIndex = 0
+        vd.attributes[2].format = .float4; vd.attributes[2].offset = 16; vd.attributes[2].bufferIndex = 0
+        vd.layouts[0].stride = 32
+        self.vertexDescriptor = vd
+
+        let cursorMSL = """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct COut { float4 pos [[position]]; float2 uv; };
+        vertex COut cursor_vs(uint vid [[vertex_id]], constant float4 *v [[buffer(0)]]) {
+            COut o; o.pos = float4(v[vid].xy, 0, 1); o.uv = v[vid].zw; return o;
+        }
+        fragment float4 cursor_fs(COut in [[stage_in]], texture2d<float> t [[texture(0)]]) {
+            constexpr sampler s(filter::nearest);
+            return t.sample(s, in.uv);
+        }
+        """
+        do {
+            let lib = try device.makeLibrary(source: cursorMSL, options: nil)
+            let pDesc = MTLRenderPipelineDescriptor()
+            pDesc.vertexFunction = lib.makeFunction(name: "cursor_vs")
+            pDesc.fragmentFunction = lib.makeFunction(name: "cursor_fs")
+            pDesc.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+            pDesc.colorAttachments[0].isBlendingEnabled = true
+            pDesc.colorAttachments[0].sourceRGBBlendFactor = .one
+            pDesc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            pDesc.colorAttachments[0].sourceAlphaBlendFactor = .one
+            pDesc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            cursorPipeline = try device.makeRenderPipelineState(descriptor: pDesc)
+        } catch {
+            print("VirtioMetal: cursor pipeline failed: \(error)")
+        }
+
+        print("VirtioMetal: initialized headless (\(displayWidth)×\(displayHeight))")
+    }
+
+    /// Resolve DRAWABLE_HANDLE to the appropriate texture. In windowed mode,
+    /// acquires from the CAMetalLayer. In headless mode, uses the offscreen texture.
+    private func resolveDrawable() -> MTLTexture? {
+        if let offscreen = offscreenDrawable {
+            offscreenAcquired = true
+            return offscreen
+        }
+        if currentDrawable == nil { currentDrawable = layer?.nextDrawable() }
+        return currentDrawable?.texture
     }
 
     // MARK: - Config space
@@ -518,12 +596,11 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let clearB = payload.loadUnaligned(fromByteOffset: 24, as: Float.self)
             let clearA = size >= 32 ? payload.loadUnaligned(fromByteOffset: 28, as: Float.self) : 1.0
 
-            // Resolve texture handles — DRAWABLE_HANDLE means "use the CAMetalLayer drawable"
+            // Resolve texture handles — DRAWABLE_HANDLE means "use the drawable"
             let colorTexture: MTLTexture
             if colorTex == DRAWABLE_HANDLE {
-                if currentDrawable == nil { currentDrawable = layer.nextDrawable() }
-                guard let drawable = currentDrawable else { return }
-                colorTexture = drawable.texture
+                guard let tex = resolveDrawable() else { return }
+                colorTexture = tex
             } else {
                 guard let tex = textures[colorTex] else { return }
                 colorTexture = tex
@@ -531,8 +608,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
             let resolveTexture: MTLTexture?
             if resolveTex == DRAWABLE_HANDLE {
-                if currentDrawable == nil { currentDrawable = layer.nextDrawable() }
-                resolveTexture = currentDrawable?.texture
+                resolveTexture = resolveDrawable()
             } else if resolveTex == 0 {
                 resolveTexture = nil
             } else {
@@ -666,8 +742,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let idx = payload.loadUnaligned(fromByteOffset: 4, as: UInt8.self)
             let tex: MTLTexture?
             if handle == DRAWABLE_HANDLE {
-                if currentDrawable == nil { currentDrawable = layer.nextDrawable() }
-                tex = currentDrawable?.texture
+                tex = resolveDrawable()
             } else {
                 tex = textures[handle]
             }
@@ -718,8 +793,8 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let dy = payload.loadUnaligned(fromByteOffset: 18, as: UInt16.self)
 
             // DRAWABLE_HANDLE → use the current drawable's texture.
-            let srcTex: MTLTexture? = srcHandle == DRAWABLE_HANDLE ? currentDrawable?.texture : textures[srcHandle]
-            let dstTex: MTLTexture? = dstHandle == DRAWABLE_HANDLE ? currentDrawable?.texture : textures[dstHandle]
+            let srcTex: MTLTexture? = srcHandle == DRAWABLE_HANDLE ? resolveDrawable() : textures[srcHandle]
+            let dstTex: MTLTexture? = dstHandle == DRAWABLE_HANDLE ? resolveDrawable() : textures[dstHandle]
             guard let srcTex, let dstTex else { return }
             currentBlitEncoder?.copy(
                 from: srcTex, sourceSlice: 0, sourceLevel: 0,
@@ -858,10 +933,47 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 || captureFrames.contains(frameCount)
 
             // Present frame — full or cursor-only.
-            let presentedDrawable: CAMetalDrawable?
-            if let drawable = currentDrawable, let cb = currentCommandBuffer {
-                // Full frame: save cursor-free content to retained frame,
-                // then composite cursor onto the drawable.
+            // In headless mode (offscreenDrawable != nil), rendering targets
+            // the offscreen texture directly. No CAMetalDrawable, no present.
+            let captureTexture: MTLTexture?
+            if offscreenDrawable != nil {
+                // Headless: offscreen texture is the render target.
+                if let cb = currentCommandBuffer {
+                    ensureRetainedFrame()
+                    if let retained = retainedFrame, let offscreen = offscreenDrawable {
+                        let sz = MTLSize(width: Int(displayWidth), height: Int(displayHeight), depth: 1)
+                        let origin = MTLOrigin(x: 0, y: 0, z: 0)
+                        let blit = cb.makeBlitCommandEncoder()!
+                        blit.copy(from: offscreen, sourceSlice: 0, sourceLevel: 0,
+                                  sourceOrigin: origin, sourceSize: sz,
+                                  to: retained, destinationSlice: 0, destinationLevel: 0,
+                                  destinationOrigin: origin)
+                        blit.endEncoding()
+                    }
+                    compositeCursor(onto: offscreenDrawable!, commandBuffer: cb)
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    captureTexture = offscreenDrawable
+                } else if let retained = retainedFrame, let offscreen = offscreenDrawable {
+                    // Cursor-only: blit retained to offscreen, composite cursor.
+                    let cb = commandQueue.makeCommandBuffer()!
+                    let sz = MTLSize(width: Int(displayWidth), height: Int(displayHeight), depth: 1)
+                    let origin = MTLOrigin(x: 0, y: 0, z: 0)
+                    let blit = cb.makeBlitCommandEncoder()!
+                    blit.copy(from: retained, sourceSlice: 0, sourceLevel: 0,
+                              sourceOrigin: origin, sourceSize: sz,
+                              to: offscreen, destinationSlice: 0, destinationLevel: 0,
+                              destinationOrigin: origin)
+                    blit.endEncoding()
+                    compositeCursor(onto: offscreen, commandBuffer: cb)
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    captureTexture = offscreen
+                } else {
+                    captureTexture = nil
+                }
+            } else if let drawable = currentDrawable, let cb = currentCommandBuffer {
+                // Windowed: full frame with CAMetalDrawable present.
                 ensureRetainedFrame()
                 if let retained = retainedFrame {
                     let sz = MTLSize(width: Int(displayWidth), height: Int(displayHeight), depth: 1)
@@ -873,20 +985,16 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                               destinationOrigin: origin)
                     blit.endEncoding()
                 }
-
-                // Skip GPU cursor compositing when NSCursor is active (hostCursor).
                 if hostCursor == nil {
                     compositeCursor(onto: drawable.texture, commandBuffer: cb)
                 }
-
                 cb.present(drawable)
                 cb.commit()
                 cb.waitUntilCompleted()
-                presentedDrawable = drawable
+                captureTexture = drawable.texture
             } else if let retained = retainedFrame {
-                // Cursor-only frame: blit retained content to drawable,
-                // then composite cursor directly onto the drawable.
-                guard let drawable = layer.nextDrawable(),
+                // Windowed: cursor-only frame.
+                guard let drawable = layer?.nextDrawable(),
                       let cb = commandQueue.makeCommandBuffer() else { break }
                 let sz = MTLSize(width: Int(displayWidth), height: Int(displayHeight), depth: 1)
                 let origin = MTLOrigin(x: 0, y: 0, z: 0)
@@ -896,17 +1004,15 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                           to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
                           destinationOrigin: origin)
                 blit.endEncoding()
-                // Skip GPU cursor compositing when NSCursor is active (hostCursor).
                 if hostCursor == nil {
                     compositeCursor(onto: drawable.texture, commandBuffer: cb)
                 }
-
                 cb.present(drawable)
                 cb.commit()
                 cb.waitUntilCompleted()
-                presentedDrawable = drawable
+                captureTexture = drawable.texture
             } else {
-                presentedDrawable = nil
+                captureTexture = nil
             }
 
             // Process pending cursor readback now that GPU work has completed.
@@ -964,8 +1070,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             }
 
             // Capture AFTER the render commands have executed.
-            if shouldCapture, let drawable = presentedDrawable {
-                let tex = drawable.texture
+            if shouldCapture, let tex = captureTexture {
                 let desc = MTLTextureDescriptor.texture2DDescriptor(
                     pixelFormat: tex.pixelFormat,
                     width: tex.width, height: tex.height,
@@ -1012,6 +1117,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
             currentCommandBuffer = nil
             currentDrawable = nil
+            offscreenAcquired = false
 
             // Exit after the last requested capture frame.
             if shouldCapture && exitAfterCapture {
