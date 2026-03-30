@@ -25,7 +25,7 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
 - **Crash reporting** — automatic crash report on kernel panic via [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device. Captures vCPU registers, system registers, and full serial log to `/tmp/hypervisor-crash-<timestamp>.log`
 - **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc. Captures always include the cursor plane composite for accurate visual testing
-- **Background mode** — `--background` hides the window and suppresses Dock icon / focus stealing. Metal rendering still works (the window exists in the compositing tree but ordered behind). Designed for CI pipelines and automated captures
+- **Background mode** — `--background` renders to an offscreen Metal texture with no window, no CAMetalLayer, and no interaction with the macOS window server. Zero focus disruption. Designed for CI pipelines and automated captures
 - **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Combine with `--background` for headless operation
 - **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
 - **Watchdog timeout** — `--timeout SECS` exits with code 2 if the VM doesn't finish in time. Prevents infinite hangs when a kernel deadlocks before producing frames
@@ -81,7 +81,7 @@ Options:
   --verbose            Enable verbose logging
   --no-gpu             Boot without GPU (serial only, no window)
   --windowed           Run in a window instead of fullscreen
-  --background         No visible window, no focus steal (for CI / automated captures)
+  --background         Headless rendering (offscreen texture, no window, no focus steal)
   --ram SIZE           RAM size in MiB (default: 256)
   --cpus N             Number of vCPUs (default: 4)
   --share DIR          9P shared directory (auto-detected if omitted)
@@ -123,7 +123,7 @@ Exit codes:
 .build/debug/hypervisor kernel.elf --capture 10,30,60 /tmp/anim.png
 # Produces /tmp/anim-010.png, /tmp/anim-030.png, /tmp/anim-060.png
 
-# Background mode — Metal renders but no window/Dock icon appears
+# Background mode — headless rendering, no window created
 .build/debug/hypervisor kernel.elf --background --capture 5 /tmp/screenshot.png
 
 # Run an event script in background mode (headless CI)
