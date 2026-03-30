@@ -129,8 +129,9 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.window.orderBack(nil)
         }
 
-        // Accept mouse events
+        // Wire up the content view.
         self.contentView.appWindow = self
+        self.contentView.background = background
     }
 
     // MARK: - Display update
@@ -341,6 +342,10 @@ final class AppWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
 final class MetalView: NSView {
     weak var appWindow: AppWindow?
 
+    /// Background mode: reject keyboard focus to prevent host keystrokes
+    /// from leaking into the guest during automated captures.
+    var background: Bool = false
+
     /// Custom cursor from the guest (set via setCursorImage).
     /// When set, used as the view's cursor instead of hiding the system cursor.
     var guestCursor: NSCursor?
@@ -355,17 +360,20 @@ final class MetalView: NSView {
         return NSCursor(image: img, hotSpot: .zero)
     }()
 
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { !background }
 
     override func keyDown(with event: NSEvent) {
+        if background { return }
         appWindow?.handleKeyEvent(event)
     }
 
     override func keyUp(with event: NSEvent) {
+        if background { return }
         appWindow?.handleKeyEvent(event)
     }
 
     override func flagsChanged(with event: NSEvent) {
+        if background { return }
         appWindow?.handleFlagsChanged(event)
     }
 
@@ -374,6 +382,7 @@ final class MetalView: NSView {
     /// at the window level, preventing keyDown from firing. We intercept
     /// when modifiers are held and forward to the guest instead.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if background { return false }
         let interesting: NSEvent.ModifierFlags = [.control, .option, .command]
         if event.type == .keyDown && !event.modifierFlags.intersection(interesting).isEmpty {
             appWindow?.handleKeyEvent(event)
