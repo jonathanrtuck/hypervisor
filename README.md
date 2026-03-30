@@ -156,6 +156,7 @@ key shift+left            # Modified key (modifiers: shift, ctrl, alt, cmd)
 move 100 200              # Move pointer to (x, y) without clicking
 click 100 200             # Left click at (x, y) in points
 dblclick 100 200          # Double click
+drag 100 200 300 200      # Drag from (x1,y1) to (x2,y2) over ~10 frames
 wait 10                   # Wait 10 extra frames
 capture /tmp/result.png   # Screenshot at this point
 ```

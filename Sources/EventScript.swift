@@ -9,6 +9,7 @@
 ///     move 100 200         — move pointer to (x, y) without clicking
 ///     click 100 200        — click at (x, y) in framebuffer pixels
 ///     dblclick 100 200     — double-click at (x, y) in framebuffer pixels
+///     drag 100 200 300 200 — drag from (x1, y1) to (x2, y2) over ~10 frames
 ///     wait 10              — wait 10 extra frames
 ///     capture /tmp/out.png — capture screenshot
 ///
@@ -236,6 +237,35 @@ class EventSchedule {
                 schedule.addActions(click2, at: frame)
                 frame += delay
 
+            case .drag(let x1, let y1, let x2, let y2):
+                // Move to start position and press button.
+                let pressEvents: [FrameAction] = [
+                    .pointer(x: x1, y: y1),
+                    .tabletSync,
+                    .button(code: BTN_LEFT, value: 1),
+                    .tabletSync,
+                ]
+                schedule.addActions(pressEvents, at: frame)
+                frame += 1
+
+                // Interpolate pointer movement over 10 frames.
+                let steps = 10
+                for i in 1...steps {
+                    let t = Float(i) / Float(steps)
+                    let x = x1 + (x2 - x1) * t
+                    let y = y1 + (y2 - y1) * t
+                    schedule.addActions([.pointer(x: x, y: y), .tabletSync], at: frame)
+                    frame += 1
+                }
+
+                // Release button at final position.
+                let releaseEvents: [FrameAction] = [
+                    .button(code: BTN_LEFT, value: 0),
+                    .tabletSync,
+                ]
+                schedule.addActions(releaseEvents, at: frame)
+                frame += delay
+
             case .wait(let frames):
                 frame += frames
 
@@ -269,6 +299,7 @@ enum ScriptAction {
     case move(Float, Float)
     case click(Float, Float)
     case dblclick(Float, Float)
+    case drag(Float, Float, Float, Float) // x1, y1, x2, y2
     case wait(Int)
     case capture(String)
 }
@@ -321,6 +352,13 @@ func parseEventScript(_ text: String) -> [ScriptAction] {
             let coords = argStr.split(separator: " ")
             if coords.count >= 2, let x = Float(coords[0]), let y = Float(coords[1]) {
                 actions.append(.dblclick(x, y))
+            }
+        case "drag":
+            let coords = argStr.split(separator: " ")
+            if coords.count >= 4,
+               let x1 = Float(coords[0]), let y1 = Float(coords[1]),
+               let x2 = Float(coords[2]), let y2 = Float(coords[3]) {
+                actions.append(.drag(x1, y1, x2, y2))
             }
         case "wait":
             if let n = Int(argStr.trimmingCharacters(in: .whitespaces)) {
