@@ -73,13 +73,13 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 | `VirtioMetalBackend` | `VirtioMetal.swift` | 22 (custom)      | Metal            |
 | `VirtioBlockBackend` | `VirtioBlock.swift` | 2                | Foundation (FS)  |
 
-**Display** (`AppWindow.swift`): NSWindow + CAMetalLayer + macOS input forwarding. Converts NSEvent keyboard/mouse events into Linux evdev codes for the guest.
+**Display** (`AppWindow.swift`): NSWindow + CAMetalLayer + macOS input forwarding (interactive mode only). Converts NSEvent keyboard/mouse events into Linux evdev codes for the guest. Not used in `--background` mode (headless rendering via offscreen MTLTexture).
 
 **Support**: `DTB.swift` (flattened device tree generator), `PL011.swift` (UART + log buffer), `PVPanic.swift` (pvpanic-mmio device), `CrashReport.swift` (crash report writer), `MetalProtocol.swift` (GPU command wire format enums), `EventScript.swift` (automated input injection for testing).
 
 **Crash reporting**: On kernel panic, the guest writes `0x01` to the pvpanic MMIO register at `0x0902_0000` (QEMU pvpanic-mmio spec). The hypervisor captures all vCPU registers via `hv_vcpu_get_reg`/`hv_vcpu_get_sys_reg`, combines them with the PL011 serial log buffer, and writes a timestamped crash report to `/tmp/hypervisor-crash-<ts>.log`. Detection flows: pvpanic MMIO write → `VCPU.handleDataAbort` → `captureSnapshot` → `writeCrashReport` → `exit(1)`. The kernel's panic handler calls `pvpanic_signal()` then `system_off()` (PSCI) as a fallback.
 
-**Background mode**: `--background` uses `.accessory` activation policy (no Dock icon), sets `window.alphaValue = 0` (fully transparent), orders the window behind others via `orderBack`, and skips `app.activate`. The window must be in the compositing tree for `nextDrawable()` to work (IOSurface-backed drawables are managed by the window server), but the zero alpha makes it invisible. Designed for CI pipelines and automated captures. Note: `--events` does **not** imply background mode — pass `--background` explicitly.
+**Background mode**: `--background` renders to an offscreen `MTLTexture` — no `NSWindow`, no `CAMetalLayer`, no interaction with the macOS window server. Zero focus disruption, zero visual artifacts. `DRAWABLE_HANDLE` resolves to the offscreen texture; present is a no-op. Captures read from the same texture. Designed for CI pipelines and automated captures. Note: `--events` does **not** imply background mode — pass `--background` explicitly.
 
 **Watchdog timeout**: `--timeout SECS` schedules a GCD timer that fires `exit(2)` if the VM hasn't exited in time. Prevents infinite hangs when the kernel deadlocks (no pvpanic) or panics before virtio devices are initialized. Exit codes: 0 = success, 1 = panic, 2 = timeout.
 
