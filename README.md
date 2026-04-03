@@ -132,6 +132,7 @@ type hello world
 key backspace
 wait 5
 capture /tmp/result.png
+exit
 SCRIPT
 .build/debug/hypervisor kernel.elf --background --events /tmp/test.events
 
@@ -159,6 +160,7 @@ dblclick 100 200          # Double click
 drag 100 200 300 200      # Drag from (x1,y1) to (x2,y2) over ~10 frames
 wait 10                   # Wait 10 extra frames
 capture /tmp/result.png   # Screenshot at this point
+exit                      # Exit the hypervisor cleanly
 ```
 
 ## architecture

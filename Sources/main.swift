@@ -343,14 +343,17 @@ func main() throws {
         backend.verbose = config.verbose
         backend.captureFrames = config.captureFrames
         backend.capturePath = config.capturePath
-        backend.exitAfterCapture = !config.captureFrames.isEmpty
         vm.addVirtioDevice(slot: 3, backend: backend)
         print("  GPU: Metal passthrough (slot 3)")
 
-        // ── Event script ──────────────────────────────────────────────
+        // ── Event schedule ───────────────────────────────────────────
+        // Built from --events file, --capture flags, or both.
+        // The schedule is the single source of truth for what happens
+        // at each frame — captures, input injection, and exit.
+        let schedule: EventSchedule
         if let eventsPath = config.eventsFile {
             guard let actions = loadEventScript(path: eventsPath) else { exit(1) }
-            let schedule = EventSchedule.build(actions: actions)
+            schedule = EventSchedule.build(actions: actions)
             print("  Events: \(eventsPath) (\(actions.count) actions, through frame \(schedule.maxFrame))")
 
             // Merge script captures into VirtioMetal capture state.
@@ -359,13 +362,24 @@ func main() throws {
                     if case .capture(let path) = action {
                         backend.captureFrames.insert(frame)
                         backend.capturePath = path
-                        backend.exitAfterCapture = true
                     }
                 }
             }
+        } else if !config.captureFrames.isEmpty {
+            // --capture N without an event script: build a minimal schedule
+            // that exits one frame after the last capture.
+            let maxCapture = config.captureFrames.max()!
+            schedule = EventSchedule.build(actions: [
+                .wait(maxCapture + 1),
+                .exit,
+            ])
+        } else {
+            schedule = EventSchedule.build(actions: [])
+        }
 
-            // Wire onFrame callback: inject keyboard/tablet events at scheduled frames.
-            // Use display size (pixels) — event script coordinates match --resolution.
+        // Wire onFrame callback: inject input events and handle exit
+        // at scheduled frames.
+        if !schedule.isEmpty {
             let fbSize = CGSize(width: CGFloat(backend.displayWidth),
                                 height: CGFloat(backend.displayHeight))
             backend.onFrame = { [weak vm] frame in
@@ -397,14 +411,11 @@ func main() throws {
                         tab.injectEvent(type: 0, code: 0, value: 0,
                                         state: tabTransport.currentQueueState(queue: 0), vm: vm)
                     case .capture:
-                        break // Handled via captureFrames above
+                        break // Handled via captureFrames
+                    case .exit:
+                        exit(0)
                     }
                 }
-            }
-
-            // Exit after last scripted frame if no --capture was also specified.
-            if config.captureFrames.isEmpty && !schedule.isEmpty {
-                backend.exitAfterCapture = true
             }
         }
 
@@ -412,6 +423,9 @@ func main() throws {
         signal(SIGUSR1) { _ in
             _signalCaptureFlag = 1
         }
+
+        // Display-cadence timer starts on first presentAndCommit (not here)
+        // so that frameCount=0 always has rendered content.
     }
 
     // ── DTB ─────────────────────────────────────────────────────────────
@@ -493,8 +507,7 @@ func main() throws {
         }
 
         // Watchdog timer: exit with code 2 if the VM doesn't finish in time.
-        // Prevents infinite hangs when the kernel panics before producing
-        // frames (--capture waits forever) or deadlocks silently.
+        // Safety net for kernel panics or deadlocks before virtio init.
         if let seconds = config.timeout {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .seconds(seconds)) {
                 FileHandle.standardError.write(

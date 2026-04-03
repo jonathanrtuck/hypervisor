@@ -12,6 +12,7 @@
 ///     drag 100 200 300 200 — drag from (x1, y1) to (x2, y2) over ~10 frames
 ///     wait 10              — wait 10 extra frames
 ///     capture /tmp/out.png — capture screenshot
+///     exit                 — exit the hypervisor cleanly
 ///
 /// Lines starting with # are comments. Blank lines are ignored.
 
@@ -108,6 +109,8 @@ enum FrameAction {
     case tabletSync
     /// Capture screenshot to path.
     case capture(path: String)
+    /// Exit the hypervisor cleanly.
+    case exit
 }
 
 // ── Event schedule ────────────────────────────────────────────────────
@@ -134,11 +137,10 @@ class EventSchedule {
     ///
     /// - Parameters:
     ///   - actions: Parsed script actions.
-    ///   - startFrame: Frame number for the first action (default: 30, gives OS time to boot).
-    ///   - delay: Frames between individual key events (default: 2).
-    static func build(actions: [ScriptAction], startFrame: Int = 30, delay: Int = 1) -> EventSchedule {
+    ///   - delay: Frames between individual key events (default: 1).
+    static func build(actions: [ScriptAction], delay: Int = 1) -> EventSchedule {
         let schedule = EventSchedule()
-        var frame = startFrame
+        var frame = 0
 
         for action in actions {
             switch action {
@@ -272,6 +274,10 @@ class EventSchedule {
             case .capture(let path):
                 schedule.addActions([.capture(path: path)], at: frame)
                 frame += delay
+
+            case .exit:
+                schedule.addActions([.exit], at: frame)
+                frame += delay
             }
         }
 
@@ -302,6 +308,7 @@ enum ScriptAction {
     case drag(Float, Float, Float, Float) // x1, y1, x2, y2
     case wait(Int)
     case capture(String)
+    case exit
 }
 
 /// Parse an event script from text.
@@ -369,6 +376,8 @@ func parseEventScript(_ text: String) -> [ScriptAction] {
             if !path.isEmpty {
                 actions.append(.capture(path))
             }
+        case "exit":
+            actions.append(.exit)
         default:
             print("EventScript: unknown command '\(command)', ignoring")
         }

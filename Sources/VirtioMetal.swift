@@ -19,7 +19,7 @@ import QuartzCore
 /// Ensures all Metal API calls happen on the same thread.
 final class GPUThread: @unchecked Sendable {
     private var thread: Thread?
-    private let queue = DispatchQueue(label: "metal-gpu", qos: .userInteractive)
+    let queue = DispatchQueue(label: "metal-gpu", qos: .userInteractive)
     private var started = false
 
     func start() {
@@ -53,7 +53,6 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     var captureFrames: Set<Int> = []    // empty = disabled
     var capturePath: String = "/tmp/hypervisor-capture.png"
     var captureNextFrame: Bool = false  // triggered by SIGUSR1
-    var exitAfterCapture: Bool = false
 
     /// Called after each frame with the new frame count.
     /// Used by the event script system to inject input at specific frames.
@@ -122,6 +121,11 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
     // Dedicated GPU thread
     private let gpuThread = GPUThread()
+
+    /// Display-cadence timer — drives frameCount, onFrame, and captures
+    /// independently of GPU submission. Fires on the GPU queue so all
+    /// Metal access is serialized.
+    private var displayTimer: DispatchSourceTimer?
 
     init(device: MTLDevice, layer: CAMetalLayer) {
         self.device = device
@@ -274,6 +278,80 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 self.processRenderQueue(state: state, vm: vm)
             }
         }
+    }
+
+    // MARK: - Display-cadence timer
+
+    /// Start the display-cadence timer on the GPU queue.
+    /// Called from presentAndCommit on the first GPU frame — not during setup.
+    /// This ensures frameCount always corresponds to a rendered frame.
+    private func startDisplayTimer() {
+        guard displayTimer == nil else { return }
+        let interval = 1.0 / Double(displayRefreshHz)
+        let timer = DispatchSource.makeTimerSource(queue: gpuThread.queue)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
+        timer.setEventHandler { [weak self] in
+            self?.displayTick()
+        }
+        displayTimer = timer
+        timer.resume()
+    }
+
+    /// One display tick: process captures and event injection for the
+    /// current frame, then advance the counter.
+    private func displayTick() {
+        // Check SIGUSR1 signal flag (set from signal handler).
+        if _signalCaptureFlag != 0 {
+            _signalCaptureFlag = 0
+            captureNextFrame = true
+        }
+
+        let shouldCapture = captureNextFrame
+            || captureFrames.contains(frameCount)
+
+        // Capture from the retained frame (latest completed GPU output).
+        if shouldCapture, let retained = retainedFrame {
+            let w = Int(displayWidth)
+            let h = Int(displayHeight)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm_srgb,
+                width: w, height: h, mipmapped: false)
+            desc.storageMode = .shared
+            desc.usage = [.shaderRead, .renderTarget]
+            if let staging = device.makeTexture(descriptor: desc) {
+                let cb = commandQueue.makeCommandBuffer()!
+                let blit = cb.makeBlitCommandEncoder()!
+                blit.copy(from: retained, sourceSlice: 0, sourceLevel: 0,
+                          sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                          sourceSize: MTLSize(width: w, height: h, depth: 1),
+                          to: staging, destinationSlice: 0, destinationLevel: 0,
+                          destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+                blit.endEncoding()
+
+                // Always composite cursor into captures.
+                compositeCursor(onto: staging, commandBuffer: cb)
+
+                cb.commit()
+                cb.waitUntilCompleted()
+
+                let outPath: String
+                if captureFrames.count > 1 {
+                    let base = (capturePath as NSString).deletingPathExtension
+                    outPath = "\(base)-\(String(format: "%03d", frameCount)).png"
+                } else {
+                    outPath = capturePath
+                }
+                saveTextureAsPNG(staging, path: outPath)
+                print("VirtioMetal: captured frame \(frameCount) → \(outPath)")
+            }
+            captureNextFrame = false
+        }
+
+        // Notify event script system (injects scheduled input events).
+        // Uses the same frameCount as captures — both see the current frame.
+        onFrame?(frameCount)
+
+        frameCount += 1
     }
 
     // MARK: - Setup queue (object creation)
@@ -924,18 +1002,14 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         // ── Frame control ────────────────────────────────────────────
 
         case .presentAndCommit:
-            // Check SIGUSR1 signal flag (set from signal handler).
-            if _signalCaptureFlag != 0 {
-                _signalCaptureFlag = 0
-                captureNextFrame = true
-            }
-            let shouldCapture = captureNextFrame
-                || captureFrames.contains(frameCount)
+            // Start the display timer on the first GPU frame. This ensures
+            // frameCount=0 always has a retained frame (rendered content).
+            startDisplayTimer()
 
             // Present frame — full or cursor-only.
-            // In headless mode (offscreenDrawable != nil), rendering targets
-            // the offscreen texture directly. No CAMetalDrawable, no present.
-            let captureTexture: MTLTexture?
+            // Frame counting, captures, and event injection are driven by
+            // the display-cadence timer (displayTick), not by GPU submission.
+            // This presentAndCommit only handles GPU work and display output.
             if offscreenDrawable != nil {
                 // Headless: offscreen texture is the render target.
                 if let cb = currentCommandBuffer {
@@ -953,7 +1027,6 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                     compositeCursor(onto: offscreenDrawable!, commandBuffer: cb)
                     cb.commit()
                     cb.waitUntilCompleted()
-                    captureTexture = offscreenDrawable
                 } else if let retained = retainedFrame, let offscreen = offscreenDrawable {
                     // Cursor-only: blit retained to offscreen, composite cursor.
                     let cb = commandQueue.makeCommandBuffer()!
@@ -968,9 +1041,6 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                     compositeCursor(onto: offscreen, commandBuffer: cb)
                     cb.commit()
                     cb.waitUntilCompleted()
-                    captureTexture = offscreen
-                } else {
-                    captureTexture = nil
                 }
             } else if let drawable = currentDrawable, let cb = currentCommandBuffer {
                 // Windowed: full frame with CAMetalDrawable present.
@@ -991,7 +1061,6 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 cb.present(drawable)
                 cb.commit()
                 cb.waitUntilCompleted()
-                captureTexture = drawable.texture
             } else if let retained = retainedFrame {
                 // Windowed: cursor-only frame.
                 guard let drawable = layer?.nextDrawable(),
@@ -1010,9 +1079,6 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 cb.present(drawable)
                 cb.commit()
                 cb.waitUntilCompleted()
-                captureTexture = drawable.texture
-            } else {
-                captureTexture = nil
             }
 
             // Process pending cursor readback now that GPU work has completed.
@@ -1069,63 +1135,9 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 }
             }
 
-            // Capture AFTER the render commands have executed.
-            if shouldCapture, let tex = captureTexture {
-                let desc = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: tex.pixelFormat,
-                    width: tex.width, height: tex.height,
-                    mipmapped: false)
-                desc.storageMode = .shared
-                desc.usage = [.shaderRead, .renderTarget]
-                if let staging = device.makeTexture(descriptor: desc) {
-                    let cb = commandQueue.makeCommandBuffer()!
-                    let blit = cb.makeBlitCommandEncoder()!
-                    blit.copy(from: tex, sourceSlice: 0, sourceLevel: 0,
-                              sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                              sourceSize: MTLSize(width: tex.width, height: tex.height, depth: 1),
-                              to: staging, destinationSlice: 0, destinationLevel: 0,
-                              destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-                    blit.endEncoding()
-
-                    // Always composite cursor into captures, even when NSCursor
-                    // is active.  The staging texture is a separate copy — the
-                    // displayed frame is unaffected.
-                    compositeCursor(onto: staging, commandBuffer: cb)
-
-                    cb.commit()
-                    cb.waitUntilCompleted()
-
-                    // Multi-frame: suffix path with frame number (e.g., prefix-030.png).
-                    // Single-frame: use path as-is for backward compatibility.
-                    let outPath: String
-                    if captureFrames.count > 1 {
-                        let base = (capturePath as NSString).deletingPathExtension
-                        outPath = "\(base)-\(String(format: "%03d", frameCount)).png"
-                    } else {
-                        outPath = capturePath
-                    }
-                    saveTextureAsPNG(staging, path: outPath)
-                    print("VirtioMetal: captured frame \(frameCount) → \(outPath)")
-                }
-                captureNextFrame = false
-            }
-
-            frameCount += 1
-
-            // Notify event script system (injects scheduled input events).
-            onFrame?(frameCount)
-
             currentCommandBuffer = nil
             currentDrawable = nil
             offscreenAcquired = false
-
-            // Exit after the last requested capture frame.
-            if shouldCapture && exitAfterCapture {
-                let maxFrame = captureFrames.max() ?? -1
-                if frameCount > maxFrame {
-                    exit(0)
-                }
-            }
         }
     }
 
