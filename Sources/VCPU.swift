@@ -86,6 +86,11 @@ final class VCPU {
         // Note: CNTFRQ_EL0 is not a trappable sys reg in Hypervisor.framework.
         // The host's counter frequency is used directly by the guest.
 
+        // Virtual counter offset: CNTVCT_EL0 = mach_absolute_time() - vtimer_offset.
+        // Setting vtimer_offset to the boot timestamp makes the guest see
+        // time-since-VM-creation instead of time-since-host-boot.
+        try hvCheck(hv_vcpu_set_vtimer_offset(vcpuId, vm.bootTimestamp), "vtimer_offset[\(index)]")
+
         // Timer control: disabled initially
         try setSysReg(HV_SYS_REG_CNTV_CTL_EL0, 0)
 

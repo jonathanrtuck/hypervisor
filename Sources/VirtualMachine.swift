@@ -53,10 +53,19 @@ final class VirtualMachine {
     /// VM configuration (set after init for crash report metadata).
     var config: Config?
 
+    /// Physical counter value at VM creation. Set as CNTVOFF_EL2 on each vCPU
+    /// so the guest's virtual counter (CNTVCT_EL0) reads as time-since-boot.
+    let bootTimestamp: UInt64
+
     init(ramSize: Int, ramBase: UInt64, verbose: Bool) throws {
         self.ramBase = ramBase
         self.ramSize = ramSize
         self.verbose = verbose
+
+        // Capture the physical counter before VM creation so all vCPUs share
+        // the same epoch. mach_absolute_time() on Apple Silicon returns the raw
+        // CNTPCT_EL0 value (timebase ratio is 1:1).
+        self.bootTimestamp = mach_absolute_time()
 
         // Create the VM
         try hvCheck(hv_vm_create(nil), "hv_vm_create")
