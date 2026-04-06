@@ -150,20 +150,21 @@ SCRIPT
 Each line specifies a frame_id and a command. Frame_ids correspond to the guest's `presentAndCommit` frame_id values. Uses standard Linux evdev key names (`linux/input-event-codes.h`). `#` comments, blank lines ignored.
 
 ```text
-0 text hello world        # Inject Unicode text at frame 0 (1 frame)
-0 text café ☕            # Full Unicode — one EV_TEXT event per codepoint
-15 key backspace          # Single key press at frame 15
-16 key shift+left         # Modified key (modifiers: shift, ctrl, alt, cmd)
-20 move 100 200           # Move pointer to (x, y)
-25 click 100 200          # Left click at (x, y) in points
-30 dblclick 100 200       # Double click (spans 2 consecutive frames)
+0 text hello world           # Inject Unicode text at frame 0 (1 frame)
+0 text café ☕                # Full Unicode — one EV_TEXT event per codepoint
+15 key backspace             # Single key press at frame 15
+16 key shift+left            # Modified key (modifiers: shift, ctrl, alt, cmd)
+20 move 100 200              # Move pointer to (x, y)
+25 click 100 200             # Left click at (x, y) in points
+30 dblclick 100 200          # Double click (spans 2 consecutive frames)
 35 drag 100 200 300 200      # Drag from→to, 12 frames (steps+2, default 10)
 35 drag 100 200 300 200 20   # Drag with 20 steps → 22 frames
 50 capture /tmp/result.png   # Screenshot
-55 exit                   # Exit the hypervisor cleanly
+55 exit                      # Exit the hypervisor cleanly
 ```
 
 Multi-frame commands expand across consecutive frame_ids starting from the specified one:
+
 - `text` — always 1 frame (all codepoints injected as EV_TEXT events at the specified frame_id)
 - `dblclick` — 2 frames (click at N, click at N+1)
 - `drag` — steps+2 frames (press + interpolation + release; default 10 steps = 12 frames; optional 5th arg overrides)
@@ -330,10 +331,6 @@ Only Apple system frameworks — no external dependencies:
 - **Metal.framework** — GPU API
 - **AppKit.framework** — windowing
 - **QuartzCore.framework** — CAMetalLayer
-
-## origin
-
-This was built for [a document-centric OS project](https://github.com/jonathanrtuck/os) exploring an operating system design where mimetypes are first-class. We needed GPU-accelerated rendering for the guest OS but found QEMUs virgl path on macOS required four translation layers (virglrenderer → ANGLE → MoltenVK → Metal) — slow, fragile, and hard to debug. So we built a native hypervisor that passes Metal commands straight through, and extracted it here for anyone with the same problem.
 
 ## license
 
