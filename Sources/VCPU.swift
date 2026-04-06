@@ -527,7 +527,9 @@ final class VCPU {
         // ICC_* (GICv3 CPU interface) — stub for Phase 1
         // The kernel will try to initialize the GIC; return 0 for reads.
         if isRead {
-            try setReg(hv_reg_t(rawValue: UInt32(rt)), 0)
+            if rt != 31 {
+                try setReg(hv_reg_t(rawValue: UInt32(rt)), 0)
+            }
         }
 
         if vm.verbose {

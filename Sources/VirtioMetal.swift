@@ -1001,10 +1001,13 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
         // ── Frame control ────────────────────────────────────────────
 
-        case .presentAndCommit:
-            // Start the display timer on the first GPU frame. This ensures
-            // frameCount=0 always has a retained frame (rendered content).
+        case .sceneReady:
+            // Scene transitioned from loading to ready. Start the display
+            // timer now — frame 0 is this presentAndCommit (the next command
+            // in this buffer). Loading-screen frames don't count.
             startDisplayTimer()
+
+        case .presentAndCommit:
 
             // Present frame — full or cursor-only.
             // Frame counting, captures, and event injection are driven by
