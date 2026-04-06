@@ -396,6 +396,14 @@ func main() throws {
                     case .keyboard(let type, let code, let value):
                         kb.injectEvent(type: type, code: code, value: value,
                                        state: kbTransport.currentQueueState(queue: 0), vm: vm)
+                    case .text(let str):
+                        let kbState = kbTransport.currentQueueState(queue: 0)
+                        for scalar in str.unicodeScalars {
+                            kb.injectEvent(type: EV_TEXT, code: 0, value: scalar.value,
+                                           state: kbState, vm: vm)
+                        }
+                        kb.injectEvent(type: EV_SYN, code: 0, value: 0,
+                                       state: kbState, vm: vm)
                     case .pointer(let x, let y):
                         let absX = UInt32(max(0, min(32767, x / Float(fbSize.width) * 32767)))
                         let absY = UInt32(max(0, min(32767, y / Float(fbSize.height) * 32767)))

@@ -17,6 +17,10 @@ let EV_SYN: UInt16 = 0
 let EV_KEY: UInt16 = 1
 let EV_ABS: UInt16 = 3
 
+// Custom event type for direct Unicode text injection.
+// Value is a Unicode scalar (u32 codepoint). Followed by EV_SYN.
+let EV_TEXT: UInt16 = 0x10
+
 // Virtio input config space select values
 private let VIRTIO_INPUT_CFG_UNSET:    UInt8 = 0x00
 private let VIRTIO_INPUT_CFG_ID_NAME:  UInt8 = 0x01

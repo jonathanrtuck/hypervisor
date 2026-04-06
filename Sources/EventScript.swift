@@ -4,22 +4,24 @@
 /// to the guest's `presentAndCommit` frame_id — actions fire when the
 /// guest presents a frame with that ID.
 ///
-///     0 type hello world       — type each character starting at frame 0
-///     10 key backspace         — press a single key at frame 10
-///     15 key shift+left        — press a modified key at frame 15
-///     20 move 100 200          — move pointer to (x, y) at frame 20
-///     25 click 100 200         — click at (x, y) at frame 25
-///     30 dblclick 100 200      — double-click at (x, y) (spans 2 frames)
+///     0 text hello world          — inject Unicode text at frame 0 (1 frame)
+///     5 text café ☕              — full Unicode support via EV_TEXT events
+///     10 key backspace            — press a single key at frame 10
+///     15 key shift+left           — press a modified key at frame 15
+///     20 move 100 200             — move pointer to (x, y) at frame 20
+///     25 click 100 200            — click at (x, y) at frame 25
+///     30 dblclick 100 200         — double-click at (x, y) (spans 2 frames)
 ///     40 drag 100 200 300 200     — drag from→to (steps+2 frames, default 12)
-///     40 drag 100 200 300 200 20  — drag with 20 interpolation steps (22 frames)
-///     55 capture /tmp/out.png  — capture screenshot at frame 55
-///     60 exit                  — exit the hypervisor cleanly
+///     40 drag 100 200 300 200 20  — drag with 20 steps (22 frames)
+///     55 capture /tmp/out.png     — capture screenshot at frame 55
+///     60 exit                     — exit the hypervisor cleanly
 ///
 /// Lines starting with # are comments. Blank lines are ignored.
 ///
+/// `text` injects one EV_TEXT event per Unicode scalar value (codepoint),
+/// all at the specified frame_id. Always consumes exactly 1 frame.
+///
 /// Multi-frame commands expand across consecutive frame_ids:
-///   - type:     1 frame per mapped ASCII character (a-z, A-Z, 0-9, space,
-///               common punctuation). Unmapped characters are skipped with a warning.
 ///   - dblclick: 2 frames (click at N, click at N+1)
 ///   - drag:     steps+2 frames (press + steps interpolation + release, default steps=10)
 ///
@@ -70,47 +72,15 @@ private let evdevKeyCodes: [String: UInt16] = [
     "f7": 65, "f8": 66, "f9": 67, "f10": 68, "f11": 87, "f12": 88,
 ]
 
-/// Map a printable character to (evdev keycode, needs shift).
-private func charToKey(_ ch: Character) -> (code: UInt16, shift: Bool)? {
-    // Lowercase letters
-    if ch >= "a" && ch <= "z" {
-        return (evdevKeyCodes[String(ch)]!, false)
-    }
-    // Uppercase letters
-    if ch >= "A" && ch <= "Z" {
-        return (evdevKeyCodes[String(ch).lowercased()]!, true)
-    }
-    // Digits
-    if ch >= "0" && ch <= "9" {
-        return (evdevKeyCodes[String(ch)]!, false)
-    }
-    // Space
-    if ch == " " { return (57, false) }
-    // Unshifted punctuation
-    let unshifted: [Character: UInt16] = [
-        "-": 12, "=": 13, "[": 26, "]": 27,
-        ";": 39, "'": 40, "`": 41, "\\": 43,
-        ",": 51, ".": 52, "/": 53,
-    ]
-    if let code = unshifted[ch] { return (code, false) }
-    // Shifted punctuation
-    let shifted: [Character: UInt16] = [
-        "!": 2, "@": 3, "#": 4, "$": 5, "%": 6,
-        "^": 7, "&": 8, "*": 9, "(": 10, ")": 11,
-        "_": 12, "+": 13, "{": 26, "}": 27,
-        ":": 39, "\"": 40, "~": 41, "|": 43,
-        "<": 51, ">": 52, "?": 53,
-    ]
-    if let code = shifted[ch] { return (code, true) }
-    return nil
-}
 
 // ── Frame actions ─────────────────────────────────────────────────────
 
-/// A single evdev-level event to inject at a specific frame.
+/// A single event to inject at a specific frame.
 enum FrameAction {
     /// Keyboard event: type (EV_KEY/EV_SYN), code (keycode), value (1=press, 0=release).
     case keyboard(type: UInt16, code: UInt16, value: UInt32)
+    /// Unicode text injection via EV_TEXT events. One event per scalar + SYN_REPORT.
+    case text(String)
     /// Move pointer to (x, y) in framebuffer pixels. Converted to absolute tablet coords at injection time.
     case pointer(x: Float, y: Float)
     /// Tablet button event (BTN_LEFT etc.). Separate from keyboard because it goes to the tablet device.
@@ -155,28 +125,8 @@ class EventSchedule {
             var frame = startFrame
 
             switch action {
-            case .type(let text):
-                for ch in text {
-                    guard let (code, shift) = charToKey(ch) else {
-                        print("EventScript: type: skipping unmapped character '\(ch)' (U+\(String(ch.unicodeScalars.first!.value, radix: 16, uppercase: true)))")
-                        continue
-                    }
-                    var events: [FrameAction] = []
-                    if shift {
-                        events.append(.keyboard(type: EV_KEY, code: 42, value: 1)) // LEFTSHIFT down
-                        events.append(.keyboard(type: EV_SYN, code: SYN_REPORT, value: 0))
-                    }
-                    events.append(.keyboard(type: EV_KEY, code: code, value: 1)) // key down
-                    events.append(.keyboard(type: EV_SYN, code: SYN_REPORT, value: 0))
-                    events.append(.keyboard(type: EV_KEY, code: code, value: 0)) // key up
-                    events.append(.keyboard(type: EV_SYN, code: SYN_REPORT, value: 0))
-                    if shift {
-                        events.append(.keyboard(type: EV_KEY, code: 42, value: 0)) // LEFTSHIFT up
-                        events.append(.keyboard(type: EV_SYN, code: SYN_REPORT, value: 0))
-                    }
-                    schedule.addActions(events, at: frame)
-                    frame += 1
-                }
+            case .text(let str):
+                schedule.addActions([.text(str)], at: frame)
 
             case .key(let parts):
                 var events: [FrameAction] = []
@@ -281,7 +231,7 @@ class EventSchedule {
 
 /// A high-level action parsed from the event script.
 enum ScriptAction {
-    case type(String)
+    case text(String)
     case key([String])         // ["shift", "left"] or ["backspace"]
     case move(Float, Float)
     case click(Float, Float)
@@ -318,9 +268,9 @@ func parseEventScript(_ text: String) -> [(frameId: Int, action: ScriptAction)] 
         let argStr = parts.count > 2 ? String(parts[2]) : ""
 
         switch command {
-        case "type":
+        case "text":
             if !argStr.isEmpty {
-                actions.append((frameId, .type(argStr)))
+                actions.append((frameId, .text(argStr)))
             }
         case "key":
             let keyParts = argStr.lowercased().split(separator: "+").map(String.init)
