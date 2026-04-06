@@ -343,6 +343,7 @@ func main() throws {
         backend.verbose = config.verbose
         backend.captureFrames = config.captureFrames
         backend.capturePath = config.capturePath
+        backend.multiCapture = config.captureFrames.count > 1
         vm.addVirtioDevice(slot: 3, backend: backend)
         print("  GPU: Metal passthrough (slot 3)")
 

@@ -52,6 +52,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     private(set) var presentCount: Int = 0
     var captureFrames: Set<Int> = []    // empty = disabled
     var capturePath: String = "/tmp/hypervisor-capture.png"
+    var multiCapture: Bool = false      // true = use PFX-NNN.png format
     var captureNextFrame: Bool = false  // triggered by SIGUSR1
     var exitWhenCapturesDone: Bool = false
 
@@ -333,7 +334,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         cb.waitUntilCompleted()
 
         let outPath: String
-        if captureFrames.count > 1 {
+        if multiCapture {
             let base = (capturePath as NSString).deletingPathExtension
             outPath = "\(base)-\(String(format: "%03d", frameId)).png"
         } else {
