@@ -53,6 +53,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     var captureFrames: Set<Int> = []    // empty = disabled
     var capturePath: String = "/tmp/hypervisor-capture.png"
     var captureNextFrame: Bool = false  // triggered by SIGUSR1
+    var exitWhenCapturesDone: Bool = false
 
     /// Called after each presentAndCommit with the guest's frame_id.
     /// Used by the event script system to inject input and trigger exit.
@@ -1126,13 +1127,15 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
             // ── Frame capture and event dispatch ──
             // Driven by the guest's frame_id, not by a display timer.
-            // Captures run before event scripts so --capture N + exit-at-N
-            // captures first, then exits.
 
             if captureNextFrame || captureFrames.contains(frameId) {
                 captureRetainedFrame(frameId: frameId)
                 captureFrames.remove(frameId)  // first match wins
                 captureNextFrame = false
+
+                if captureFrames.isEmpty && exitWhenCapturesDone {
+                    exit(0)
+                }
             }
 
             onFrame?(frameId)

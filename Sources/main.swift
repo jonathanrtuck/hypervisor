@@ -366,14 +366,11 @@ func main() throws {
                 }
             }
         } else if !config.captureFrames.isEmpty {
-            // --capture N without an event script: exit at the last captured
-            // frame. Captures run before onFrame in presentAndCommit, so the
-            // exit fires after the capture completes.
-            let maxCapture = config.captureFrames.max()!
-            schedule = EventSchedule.build(actions: [
-                .wait(maxCapture),
-                .exit,
-            ])
+            // --capture without an event script: exit after all requested
+            // frame_ids have been captured. No schedule needed — VirtioMetal
+            // checks captureFrames.isEmpty after each capture.
+            backend.exitWhenCapturesDone = true
+            schedule = EventSchedule.build(actions: [])
         } else {
             schedule = EventSchedule.build(actions: [])
         }
