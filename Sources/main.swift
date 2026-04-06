@@ -57,8 +57,8 @@ func printUsage() {
     print("  --cpus N             Number of vCPUs (default: 4)")
     print("  --share DIR          9P shared directory (auto-detected if omitted)")
     print("  --drive PATH         Disk image for virtio-blk (raw format)")
-    print("  --capture N PATH     Capture frame N as PNG to PATH, then exit")
-    print("  --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png")
+    print("  --capture N PATH     Capture frame_id N as PNG to PATH, then exit")
+    print("  --capture N,M,.. PFX Capture multiple frame_ids as PFX-NNN.png")
     print("  --events FILE        Run event script (evdev input injection + captures)")
     print("  --resolution WxH     Fixed pixel resolution (e.g., 800x600)")
     print("  --timeout SECS       Exit with code 2 if not done within SECS seconds")
@@ -349,8 +349,7 @@ func main() throws {
 
         // ── Event schedule ───────────────────────────────────────────
         // Built from --events file, --capture flags, or both.
-        // The schedule is the single source of truth for what happens
-        // at each frame — captures, input injection, and exit.
+        // Frame numbers in the schedule are guest frame_ids.
         let schedule: EventSchedule
         if let eventsPath = config.eventsFile {
             guard let actions = loadEventScript(path: eventsPath) else { exit(1) }
@@ -366,6 +365,7 @@ func main() throws {
                     }
                 }
             }
+            backend.multiCapture = backend.captureFrames.count > 1
         } else if !config.captureFrames.isEmpty {
             // --capture without an event script: exit after all requested
             // frame_ids have been captured. No schedule needed — VirtioMetal

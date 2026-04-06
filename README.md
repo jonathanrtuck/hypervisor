@@ -128,11 +128,10 @@ Exit codes:
 
 # Run an event script in background mode (headless CI)
 cat > /tmp/test.events << 'SCRIPT'
-type hello world
-key backspace
-wait 5
-capture /tmp/result.png
-exit
+0 type hello world
+15 key backspace
+20 capture /tmp/result.png
+25 exit
 SCRIPT
 .build/debug/hypervisor kernel.elf --background --events /tmp/test.events
 
@@ -148,20 +147,21 @@ SCRIPT
 
 ### Event Script Format
 
-Event scripts use standard Linux evdev key names (`linux/input-event-codes.h`). One action per line, `#` comments, blank lines ignored.
+Each line specifies a frame_id and a command. Frame_ids correspond to the guest's `presentAndCommit` frame_id values. Uses standard Linux evdev key names (`linux/input-event-codes.h`). `#` comments, blank lines ignored.
 
 ```text
-type hello world          # Type each character (handles shift for uppercase)
-key backspace             # Single key press
-key shift+left            # Modified key (modifiers: shift, ctrl, alt, cmd)
-move 100 200              # Move pointer to (x, y) without clicking
-click 100 200             # Left click at (x, y) in points
-dblclick 100 200          # Double click
-drag 100 200 300 200      # Drag from (x1,y1) to (x2,y2) over ~10 frames
-wait 10                   # Wait 10 extra frames
-capture /tmp/result.png   # Screenshot at this point
-exit                      # Exit the hypervisor cleanly
+0 type hello world        # Type each character starting at frame 0
+15 key backspace          # Single key press at frame 15
+16 key shift+left         # Modified key (modifiers: shift, ctrl, alt, cmd)
+20 move 100 200           # Move pointer to (x, y)
+25 click 100 200          # Left click at (x, y) in points
+30 dblclick 100 200       # Double click (spans 2 consecutive frames)
+35 drag 100 200 300 200   # Drag from→to over ~12 consecutive frames
+50 capture /tmp/result.png   # Screenshot
+55 exit                   # Exit the hypervisor cleanly
 ```
+
+Multi-frame commands (`type`, `drag`, `dblclick`) expand across consecutive frame_ids starting from the specified one.
 
 ## architecture
 

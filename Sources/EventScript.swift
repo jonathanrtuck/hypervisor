@@ -1,20 +1,22 @@
 /// Event script parser and scheduler for automated testing.
 ///
-/// Parses a simple line-based format using evdev key names (Linux
-/// input-event-codes.h standard):
+/// Each line specifies a frame_id and a command. The frame_id corresponds
+/// to the guest's `presentAndCommit` frame_id — actions fire when the
+/// guest presents a frame with that ID.
 ///
-///     type hello world     — type each character with key press/release
-///     key backspace        — press a single key
-///     key shift+left       — press a modified key (modifier held)
-///     move 100 200         — move pointer to (x, y) without clicking
-///     click 100 200        — click at (x, y) in framebuffer pixels
-///     dblclick 100 200     — double-click at (x, y) in framebuffer pixels
-///     drag 100 200 300 200 — drag from (x1, y1) to (x2, y2) over ~10 frames
-///     wait 10              — wait 10 extra frames
-///     capture /tmp/out.png — capture screenshot
-///     exit                 — exit the hypervisor cleanly
+///     0 type hello world       — type each character starting at frame 0
+///     10 key backspace         — press a single key at frame 10
+///     15 key shift+left        — press a modified key at frame 15
+///     20 move 100 200          — move pointer to (x, y) at frame 20
+///     25 click 100 200         — click at (x, y) at frame 25
+///     30 dblclick 100 200      — double-click at (x, y) (spans 2 frames)
+///     40 drag 100 200 300 200  — drag from→to over ~12 frames
+///     55 capture /tmp/out.png  — capture screenshot at frame 55
+///     60 exit                  — exit the hypervisor cleanly
 ///
 /// Lines starting with # are comments. Blank lines are ignored.
+/// Multi-frame commands (type, drag, dblclick) expand across
+/// consecutive frame_ids starting from the specified one.
 
 import Foundation
 
@@ -115,17 +117,18 @@ enum FrameAction {
 
 // ── Event schedule ────────────────────────────────────────────────────
 
-/// A frame-indexed schedule of input events and captures.
+/// A frame_id-indexed schedule of input events and captures.
 ///
 /// Built from a parsed event script. Used by the hypervisor to inject
-/// events at specific frames during execution.
+/// events at specific frames during execution. Frame numbers correspond
+/// to the guest's presentAndCommit frame_id values.
 class EventSchedule {
-    /// Frame number → list of actions to execute at that frame.
+    /// Frame_id → list of actions to execute at that frame.
     private var frameActions: [Int: [FrameAction]] = [:]
-    /// Highest scheduled frame (for determining when to exit).
+    /// Highest scheduled frame_id.
     private(set) var maxFrame: Int = 0
 
-    /// Get actions scheduled for a specific frame.
+    /// Get actions scheduled for a specific frame_id.
     func actionsForFrame(_ frame: Int) -> [FrameAction] {
         frameActions[frame] ?? []
     }
@@ -133,16 +136,16 @@ class EventSchedule {
     /// Whether any events or captures are scheduled.
     var isEmpty: Bool { frameActions.isEmpty }
 
-    /// Build a schedule from parsed script actions.
+    /// Build a schedule from parsed script actions with explicit frame_ids.
     ///
-    /// - Parameters:
-    ///   - actions: Parsed script actions.
-    ///   - delay: Frames between individual key events (default: 1).
-    static func build(actions: [ScriptAction], delay: Int = 1) -> EventSchedule {
+    /// Multi-frame commands (type, drag, dblclick) expand across consecutive
+    /// frame_ids starting from the action's specified frame_id.
+    static func build(actions: [(frameId: Int, action: ScriptAction)]) -> EventSchedule {
         let schedule = EventSchedule()
-        var frame = 0
 
-        for action in actions {
+        for (startFrame, action) in actions {
+            var frame = startFrame
+
             switch action {
             case .type(let text):
                 for ch in text {
@@ -161,31 +164,25 @@ class EventSchedule {
                         events.append(.keyboard(type: EV_SYN, code: SYN_REPORT, value: 0))
                     }
                     schedule.addActions(events, at: frame)
-                    frame += delay
+                    frame += 1
                 }
 
             case .key(let parts):
-                // Parts: ["shift", "left"] or ["backspace"]
-                // All parts except the last are modifiers.
                 var events: [FrameAction] = []
                 let modifiers = parts.dropLast()
                 let mainKey = parts.last!
-
-                // Press modifiers
                 for mod in modifiers {
                     if let code = evdevKeyCodes[mod] {
                         events.append(.keyboard(type: EV_KEY, code: code, value: 1))
                         events.append(.keyboard(type: EV_SYN, code: SYN_REPORT, value: 0))
                     }
                 }
-                // Press + release main key
                 if let code = evdevKeyCodes[mainKey] {
                     events.append(.keyboard(type: EV_KEY, code: code, value: 1))
                     events.append(.keyboard(type: EV_SYN, code: SYN_REPORT, value: 0))
                     events.append(.keyboard(type: EV_KEY, code: code, value: 0))
                     events.append(.keyboard(type: EV_SYN, code: SYN_REPORT, value: 0))
                 }
-                // Release modifiers (reverse order)
                 for mod in modifiers.reversed() {
                     if let code = evdevKeyCodes[mod] {
                         events.append(.keyboard(type: EV_KEY, code: code, value: 0))
@@ -193,30 +190,22 @@ class EventSchedule {
                     }
                 }
                 schedule.addActions(events, at: frame)
-                frame += delay
 
             case .move(let x, let y):
-                let events: [FrameAction] = [
-                    .pointer(x: x, y: y),
-                    .tabletSync,
-                ]
-                schedule.addActions(events, at: frame)
-                frame += delay
+                schedule.addActions([.pointer(x: x, y: y), .tabletSync], at: frame)
 
             case .click(let x, let y):
                 let events: [FrameAction] = [
                     .pointer(x: x, y: y),
                     .tabletSync,
-                    .button(code: BTN_LEFT, value: 1), // press
+                    .button(code: BTN_LEFT, value: 1),
                     .tabletSync,
-                    .button(code: BTN_LEFT, value: 0), // release
+                    .button(code: BTN_LEFT, value: 0),
                     .tabletSync,
                 ]
                 schedule.addActions(events, at: frame)
-                frame += delay
 
             case .dblclick(let x, let y):
-                // First click
                 let click1: [FrameAction] = [
                     .pointer(x: x, y: y),
                     .tabletSync,
@@ -226,8 +215,6 @@ class EventSchedule {
                     .tabletSync,
                 ]
                 schedule.addActions(click1, at: frame)
-                frame += 1 // Short delay for double-click
-                // Second click
                 let click2: [FrameAction] = [
                     .pointer(x: x, y: y),
                     .tabletSync,
@@ -236,11 +223,9 @@ class EventSchedule {
                     .button(code: BTN_LEFT, value: 0),
                     .tabletSync,
                 ]
-                schedule.addActions(click2, at: frame)
-                frame += delay
+                schedule.addActions(click2, at: frame + 1)
 
             case .drag(let x1, let y1, let x2, let y2):
-                // Move to start position and press button.
                 let pressEvents: [FrameAction] = [
                     .pointer(x: x1, y: y1),
                     .tabletSync,
@@ -249,8 +234,6 @@ class EventSchedule {
                 ]
                 schedule.addActions(pressEvents, at: frame)
                 frame += 1
-
-                // Interpolate pointer movement over 10 frames.
                 let steps = 10
                 for i in 1...steps {
                     let t = Float(i) / Float(steps)
@@ -259,25 +242,13 @@ class EventSchedule {
                     schedule.addActions([.pointer(x: x, y: y), .tabletSync], at: frame)
                     frame += 1
                 }
-
-                // Release button at final position.
-                let releaseEvents: [FrameAction] = [
-                    .button(code: BTN_LEFT, value: 0),
-                    .tabletSync,
-                ]
-                schedule.addActions(releaseEvents, at: frame)
-                frame += delay
-
-            case .wait(let frames):
-                frame += frames
+                schedule.addActions([.button(code: BTN_LEFT, value: 0), .tabletSync], at: frame)
 
             case .capture(let path):
                 schedule.addActions([.capture(path: path)], at: frame)
-                frame += delay
 
             case .exit:
                 schedule.addActions([.exit], at: frame)
-                frame += delay
             }
         }
 
@@ -306,80 +277,77 @@ enum ScriptAction {
     case click(Float, Float)
     case dblclick(Float, Float)
     case drag(Float, Float, Float, Float) // x1, y1, x2, y2
-    case wait(Int)
     case capture(String)
     case exit
 }
 
 /// Parse an event script from text.
 ///
-/// Format: one action per line. Lines starting with # are comments.
-/// Blank lines are ignored.
+/// Format: `<frame_id> <command> [args]`, one per line.
+/// Lines starting with # are comments. Blank lines are ignored.
 ///
-///     type hello world
-///     key backspace
-///     key shift+left
-///     click 100 200
-///     wait 5
-///     capture /tmp/test.png
-func parseEventScript(_ text: String) -> [ScriptAction] {
-    var actions: [ScriptAction] = []
+///     0 type hello world
+///     10 key backspace
+///     15 click 100 200
+///     20 capture /tmp/test.png
+///     25 exit
+func parseEventScript(_ text: String) -> [(frameId: Int, action: ScriptAction)] {
+    var actions: [(frameId: Int, action: ScriptAction)] = []
 
-    for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+    for (lineNum, rawLine) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
         let line = rawLine.trimmingCharacters(in: .whitespaces)
         if line.isEmpty || line.hasPrefix("#") { continue }
 
-        // Split into command + arguments
-        let parts = line.split(separator: " ", maxSplits: 1)
-        guard let command = parts.first else { continue }
-        let argStr = parts.count > 1 ? String(parts[1]) : ""
+        // Split: <frame_id> <command> [args]
+        let parts = line.split(separator: " ", maxSplits: 2)
+        guard parts.count >= 2, let frameId = Int(parts[0]) else {
+            print("EventScript: line \(lineNum + 1): expected '<frame_id> <command> [args]': \(line)")
+            continue
+        }
+        let command = String(parts[1]).lowercased()
+        let argStr = parts.count > 2 ? String(parts[2]) : ""
 
-        switch command.lowercased() {
+        switch command {
         case "type":
             if !argStr.isEmpty {
-                actions.append(.type(argStr))
+                actions.append((frameId, .type(argStr)))
             }
         case "key":
-            // Parse key names, possibly with + for modifiers: "shift+left"
             let keyParts = argStr.lowercased().split(separator: "+").map(String.init)
             if !keyParts.isEmpty {
-                actions.append(.key(keyParts))
+                actions.append((frameId, .key(keyParts)))
             }
         case "move":
             let coords = argStr.split(separator: " ")
             if coords.count >= 2, let x = Float(coords[0]), let y = Float(coords[1]) {
-                actions.append(.move(x, y))
+                actions.append((frameId, .move(x, y)))
             }
         case "click":
             let coords = argStr.split(separator: " ")
             if coords.count >= 2, let x = Float(coords[0]), let y = Float(coords[1]) {
-                actions.append(.click(x, y))
+                actions.append((frameId, .click(x, y)))
             }
         case "dblclick":
             let coords = argStr.split(separator: " ")
             if coords.count >= 2, let x = Float(coords[0]), let y = Float(coords[1]) {
-                actions.append(.dblclick(x, y))
+                actions.append((frameId, .dblclick(x, y)))
             }
         case "drag":
             let coords = argStr.split(separator: " ")
             if coords.count >= 4,
                let x1 = Float(coords[0]), let y1 = Float(coords[1]),
                let x2 = Float(coords[2]), let y2 = Float(coords[3]) {
-                actions.append(.drag(x1, y1, x2, y2))
-            }
-        case "wait":
-            if let n = Int(argStr.trimmingCharacters(in: .whitespaces)) {
-                actions.append(.wait(n))
+                actions.append((frameId, .drag(x1, y1, x2, y2)))
             }
         case "capture":
             let path = argStr.trimmingCharacters(in: .whitespaces)
             if !path.isEmpty {
-                actions.append(.capture(path))
+                actions.append((frameId, .capture(path)))
             }
         case "exit":
-            actions.append(.exit)
+            actions.append((frameId, .exit))
         default:
-            print("EventScript: unknown command '\(command)', ignoring")
+            print("EventScript: line \(lineNum + 1): unknown command '\(command)'")
         }
     }
 
@@ -387,7 +355,7 @@ func parseEventScript(_ text: String) -> [ScriptAction] {
 }
 
 /// Load and parse an event script from a file path.
-func loadEventScript(path: String) -> [ScriptAction]? {
+func loadEventScript(path: String) -> [(frameId: Int, action: ScriptAction)]? {
     guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
         print("Error: cannot read event script '\(path)'")
         return nil
