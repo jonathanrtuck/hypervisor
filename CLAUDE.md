@@ -9,7 +9,7 @@ make build          # swift build
 make sign           # build + codesign with hypervisor entitlement
 make run KERNEL=path/to/kernel.elf          # sign + run
 make run KERNEL=path/to/kernel.elf ARGS="--windowed --verbose"
-make run KERNEL=path/to/kernel.elf ARGS="--background --capture 5 /tmp/out.png"  # headless capture
+make run KERNEL=path/to/kernel.elf ARGS="--background --capture 0 /tmp/out.png"  # headless capture
 make run-verbose KERNEL=path/to/kernel.elf  # with --verbose
 make run-serial KERNEL=path/to/kernel.elf   # --no-gpu (no window)
 make clean          # swift package clean

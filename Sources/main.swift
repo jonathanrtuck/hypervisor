@@ -366,11 +366,12 @@ func main() throws {
                 }
             }
         } else if !config.captureFrames.isEmpty {
-            // --capture N without an event script: build a minimal schedule
-            // that exits one frame after the last capture.
+            // --capture N without an event script: exit at the last captured
+            // frame. Captures run before onFrame in presentAndCommit, so the
+            // exit fires after the capture completes.
             let maxCapture = config.captureFrames.max()!
             schedule = EventSchedule.build(actions: [
-                .wait(maxCapture + 1),
+                .wait(maxCapture),
                 .exit,
             ])
         } else {
@@ -424,8 +425,8 @@ func main() throws {
             _signalCaptureFlag = 1
         }
 
-        // Display-cadence timer starts on first presentAndCommit (not here)
-        // so that frameCount=0 always has rendered content.
+        // Display timer starts on first presentAndCommit (for SIGUSR1 only).
+        // Scheduled captures and event scripts are driven by presents.
     }
 
     // ── DTB ─────────────────────────────────────────────────────────────

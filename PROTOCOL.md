@@ -399,8 +399,11 @@ Payload:
 Present the drawable and commit the command buffer. This ends the frame.
 
 ```text
-Payload: (none)
+Payload:
+  u32   frame_id       Guest-assigned frame identifier
 ```
+
+The `frame_id` is an opaque value assigned by the guest. The host uses it for `--capture` matching and event script timing — `--capture N` captures the first present whose `frame_id` equals N. Guests that don't need deterministic frame identification can send 0 for every present. Guests that need deterministic captures (e.g., for visual regression testing) should assign sequential IDs starting from 0.
 
 The host presents the CAMetalLayer drawable (if one was acquired via `DRAWABLE_HANDLE`) and commits the Metal command buffer. The guest should wait for the virtio completion before submitting the next frame.
 

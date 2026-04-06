@@ -507,8 +507,9 @@ impl<'a> CmdEncoder<'a> {
         self.push_u32(vertex_count);
     }
 
-    fn present_and_commit(&mut self) {
-        self.header(0x0F00, 0);
+    fn present_and_commit(&mut self, frame_id: u32) {
+        self.header(0x0F00, 4);
+        self.push_u32(frame_id);
     }
 }
 
@@ -664,7 +665,7 @@ pub extern "C" fn main() {
         enc.end_render_pass();
 
         // 6. Present to screen
-        enc.present_and_commit();
+        enc.present_and_commit(0);
 
         enc.len()
     };

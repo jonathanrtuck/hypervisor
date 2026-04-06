@@ -49,13 +49,13 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     var displayRefreshHz: UInt32 = 60
 
     // Frame capture state
-    private(set) var frameCount: Int = 0
+    private(set) var presentCount: Int = 0
     var captureFrames: Set<Int> = []    // empty = disabled
     var capturePath: String = "/tmp/hypervisor-capture.png"
     var captureNextFrame: Bool = false  // triggered by SIGUSR1
 
-    /// Called after each frame with the new frame count.
-    /// Used by the event script system to inject input at specific frames.
+    /// Called after each presentAndCommit with the guest's frame_id.
+    /// Used by the event script system to inject input and trigger exit.
     var onFrame: ((Int) -> Void)?
 
     // Metal state
@@ -122,7 +122,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     // Dedicated GPU thread
     private let gpuThread = GPUThread()
 
-    /// Display-cadence timer — drives frameCount, onFrame, and captures
+    /// Display-cadence timer — handles SIGUSR1 ad-hoc captures only.
     /// independently of GPU submission. Fires on the GPU queue so all
     /// Metal access is serialized.
     private var displayTimer: DispatchSourceTimer?
@@ -283,8 +283,8 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     // MARK: - Display-cadence timer
 
     /// Start the display-cadence timer on the GPU queue.
-    /// Called from presentAndCommit on the first GPU frame — not during setup.
-    /// This ensures frameCount always corresponds to a rendered frame.
+    /// Called on the first presentAndCommit. Only used for SIGUSR1 ad-hoc
+    /// captures — scheduled captures and event scripts are driven by presents.
     private func startDisplayTimer() {
         guard displayTimer == nil else { return }
         let interval = 1.0 / Double(displayRefreshHz)
@@ -297,61 +297,49 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         timer.resume()
     }
 
-    /// One display tick: process captures and event injection for the
-    /// current frame, then advance the counter.
+    /// Display tick: only handles SIGUSR1 ad-hoc captures.
+    /// Scheduled captures and event scripts are driven by presentAndCommit.
     private func displayTick() {
-        // Check SIGUSR1 signal flag (set from signal handler).
         if _signalCaptureFlag != 0 {
             _signalCaptureFlag = 0
-            captureNextFrame = true
+            captureRetainedFrame(frameId: presentCount)
         }
+    }
 
-        let shouldCapture = captureNextFrame
-            || captureFrames.contains(frameCount)
+    /// Capture the current retained frame (latest completed GPU output) to disk.
+    /// Used by presentAndCommit for scheduled captures and by displayTick for
+    /// SIGUSR1 ad-hoc captures.
+    private func captureRetainedFrame(frameId: Int) {
+        guard let retained = retainedFrame else { return }
+        let w = Int(displayWidth)
+        let h = Int(displayHeight)
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: w, height: h, mipmapped: false)
+        desc.storageMode = .shared
+        desc.usage = [.shaderRead, .renderTarget]
+        guard let staging = device.makeTexture(descriptor: desc) else { return }
+        let cb = commandQueue.makeCommandBuffer()!
+        let blit = cb.makeBlitCommandEncoder()!
+        blit.copy(from: retained, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: w, height: h, depth: 1),
+                  to: staging, destinationSlice: 0, destinationLevel: 0,
+                  destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+        compositeCursor(onto: staging, commandBuffer: cb)
+        cb.commit()
+        cb.waitUntilCompleted()
 
-        // Capture from the retained frame (latest completed GPU output).
-        if shouldCapture, let retained = retainedFrame {
-            let w = Int(displayWidth)
-            let h = Int(displayHeight)
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm_srgb,
-                width: w, height: h, mipmapped: false)
-            desc.storageMode = .shared
-            desc.usage = [.shaderRead, .renderTarget]
-            if let staging = device.makeTexture(descriptor: desc) {
-                let cb = commandQueue.makeCommandBuffer()!
-                let blit = cb.makeBlitCommandEncoder()!
-                blit.copy(from: retained, sourceSlice: 0, sourceLevel: 0,
-                          sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                          sourceSize: MTLSize(width: w, height: h, depth: 1),
-                          to: staging, destinationSlice: 0, destinationLevel: 0,
-                          destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-                blit.endEncoding()
-
-                // Always composite cursor into captures.
-                compositeCursor(onto: staging, commandBuffer: cb)
-
-                cb.commit()
-                cb.waitUntilCompleted()
-
-                let outPath: String
-                if captureFrames.count > 1 {
-                    let base = (capturePath as NSString).deletingPathExtension
-                    outPath = "\(base)-\(String(format: "%03d", frameCount)).png"
-                } else {
-                    outPath = capturePath
-                }
-                saveTextureAsPNG(staging, path: outPath)
-                print("VirtioMetal: captured frame \(frameCount) → \(outPath)")
-            }
-            captureNextFrame = false
+        let outPath: String
+        if captureFrames.count > 1 {
+            let base = (capturePath as NSString).deletingPathExtension
+            outPath = "\(base)-\(String(format: "%03d", frameId)).png"
+        } else {
+            outPath = capturePath
         }
-
-        // Notify event script system (injects scheduled input events).
-        // Uses the same frameCount as captures — both see the current frame.
-        onFrame?(frameCount)
-
-        frameCount += 1
+        saveTextureAsPNG(staging, path: outPath)
+        print("VirtioMetal: captured frame \(frameId) → \(outPath)")
     }
 
     // MARK: - Setup queue (object creation)
@@ -1001,18 +989,12 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
         // ── Frame control ────────────────────────────────────────────
 
-        case .sceneReady:
-            // Scene transitioned from loading to ready. Start the display
-            // timer now — frame 0 is this presentAndCommit (the next command
-            // in this buffer). Loading-screen frames don't count.
-            startDisplayTimer()
-
         case .presentAndCommit:
-
-            // Present frame — full or cursor-only.
-            // Frame counting, captures, and event injection are driven by
-            // the display-cadence timer (displayTick), not by GPU submission.
-            // This presentAndCommit only handles GPU work and display output.
+            guard size >= 4 else {
+                print("VirtioMetal: presentAndCommit missing frame_id payload")
+                break
+            }
+            let frameId = Int(payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
             if offscreenDrawable != nil {
                 // Headless: offscreen texture is the render target.
                 if let cb = currentCommandBuffer {
@@ -1141,6 +1123,23 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             currentCommandBuffer = nil
             currentDrawable = nil
             offscreenAcquired = false
+
+            // ── Frame capture and event dispatch ──
+            // Driven by the guest's frame_id, not by a display timer.
+            // Captures run before event scripts so --capture N + exit-at-N
+            // captures first, then exits.
+
+            if captureNextFrame || captureFrames.contains(frameId) {
+                captureRetainedFrame(frameId: frameId)
+                captureFrames.remove(frameId)  // first match wins
+                captureNextFrame = false
+            }
+
+            onFrame?(frameId)
+            presentCount += 1
+
+            // Start display timer on first present (for SIGUSR1 only).
+            startDisplayTimer()
         }
     }
 

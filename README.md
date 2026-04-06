@@ -24,7 +24,7 @@ Your guest kernel sends Metal commands over a virtio device. The hypervisor repl
 - **Hardware GIC** — Apple Silicons native GICv3, not software emulation
 - **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
 - **Crash reporting** — automatic crash report on kernel panic via [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device. Captures vCPU registers, system registers, and full serial log to `/tmp/hypervisor-crash-<timestamp>.log`
-- **Built-in screenshot** — `--capture N path.png` for single frame, `--capture N,M,.. prefix.png` for multi-frame, `SIGUSR1` for ad-hoc. Captures always include the cursor plane composite for accurate visual testing
+- **Built-in screenshot** — `--capture N path.png` captures the first `presentAndCommit` whose guest-assigned `frame_id` matches N. `SIGUSR1` for ad-hoc captures. Captures always include the cursor plane composite for accurate visual testing
 - **Background mode** — `--background` renders to an offscreen Metal texture with no window, no CAMetalLayer, and no interaction with the macOS window server. Zero focus disruption. Designed for CI pipelines and automated captures
 - **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Combine with `--background` for headless operation
 - **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
@@ -86,8 +86,8 @@ Options:
   --cpus N             Number of vCPUs (default: 4)
   --share DIR          9P shared directory (auto-detected if omitted)
   --drive PATH         Disk image for virtio-blk (raw format)
-  --capture N PATH     Capture frame N as PNG to PATH, then exit
-  --capture N,M,.. PFX Capture multiple frames as PFX-NNN.png, exit after last
+  --capture N PATH     Capture frame with frame_id N as PNG, then exit
+  --capture N,M,.. PFX Capture multiple frame_ids as PFX-NNN.png, exit after last
   --events FILE        Run event script (evdev input injection + captures)
   --resolution WxH     Fixed pixel resolution (e.g., 800x600)
   --timeout SECS       Exit with code 2 if not done within SECS seconds
@@ -116,15 +116,15 @@ Exit codes:
 # Serial-only mode (no window, no GPU)
 .build/debug/hypervisor kernel.elf --no-gpu
 
-# Capture frame 5 as a screenshot, then exit
-.build/debug/hypervisor kernel.elf --capture 5 /tmp/screenshot.png
+# Capture frame_id 0 as a screenshot, then exit
+.build/debug/hypervisor kernel.elf --capture 0 /tmp/screenshot.png
 
-# Capture frames 10, 30, 60 in a single boot (for animation verification)
+# Capture frame_ids 10, 30, 60 in a single boot (for animation verification)
 .build/debug/hypervisor kernel.elf --capture 10,30,60 /tmp/anim.png
 # Produces /tmp/anim-010.png, /tmp/anim-030.png, /tmp/anim-060.png
 
 # Background mode — headless rendering, no window created
-.build/debug/hypervisor kernel.elf --background --capture 5 /tmp/screenshot.png
+.build/debug/hypervisor kernel.elf --background --capture 0 /tmp/screenshot.png
 
 # Run an event script in background mode (headless CI)
 cat > /tmp/test.events << 'SCRIPT'
@@ -142,8 +142,8 @@ SCRIPT
 # Boot with a disk image (virtio-blk)
 .build/debug/hypervisor kernel.elf --drive rootfs.img
 
-# Capture with a 30-second timeout (exit 2 if kernel hangs)
-.build/debug/hypervisor kernel.elf --capture 30 /tmp/out.png --timeout 30
+# Capture frame_id 0 with a 30-second timeout (exit 2 if kernel hangs)
+.build/debug/hypervisor kernel.elf --capture 0 /tmp/out.png --timeout 30
 ```
 
 ### Event Script Format

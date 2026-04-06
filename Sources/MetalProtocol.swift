@@ -186,7 +186,10 @@ enum MetalRenderCommand: UInt16 {
     // ── Frame control ────────────────────────────────────────────────
 
     /// Present the drawable and commit the command buffer.
-    /// Payload: (none)
+    /// Payload: [u32 frame_id]
+    /// The frame_id controls `--capture` matching and event script timing.
+    /// Guest-assigned, opaque to the host. Guests that don't need
+    /// deterministic frame identification can send 0 for every present.
     case presentAndCommit     = 0x0F00
 
     // ── Cursor plane ────────────────────────────────────────────────
@@ -206,12 +209,6 @@ enum MetalRenderCommand: UInt16 {
     /// Set cursor from a GPU texture handle (no pixel readback to guest).
     /// Payload: [u32 texture_handle] [u16 width] [u16 height] [i16 hotspot_x] [i16 hotspot_y]
     case setCursorFromTexture = 0x0F13
-
-    /// Scene is ready for interaction (loading complete).
-    /// Sent once when root node's STATE_BUSY clears. The host uses this
-    /// as frame origin for event scripts — frame 0 is this presentAndCommit.
-    /// Payload: (none)
-    case sceneReady           = 0x0F20
 }
 
 // MARK: - Pixel format mapping
