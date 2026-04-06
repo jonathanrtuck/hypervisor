@@ -156,7 +156,8 @@ Each line specifies a frame_id and a command. Frame_ids correspond to the guest'
 20 move 100 200           # Move pointer to (x, y)
 25 click 100 200          # Left click at (x, y) in points
 30 dblclick 100 200       # Double click (spans 2 consecutive frames)
-35 drag 100 200 300 200   # Drag from→to over ~12 consecutive frames
+35 drag 100 200 300 200      # Drag from→to, 12 frames (steps+2, default 10)
+35 drag 100 200 300 200 20   # Drag with 20 steps → 22 frames
 50 capture /tmp/result.png   # Screenshot
 55 exit                   # Exit the hypervisor cleanly
 ```
@@ -164,7 +165,7 @@ Each line specifies a frame_id and a command. Frame_ids correspond to the guest'
 Multi-frame commands expand across consecutive frame_ids starting from the specified one:
 - `type` — 1 frame per character (e.g., `0 type hello` uses frames 0-4)
 - `dblclick` — 2 frames (click at N, click at N+1)
-- `drag` — 12 frames (press + 10 interpolation steps + release)
+- `drag` — steps+2 frames (press + interpolation + release; default 10 steps = 12 frames; optional 5th arg overrides)
 
 If two commands overlap on the same frame_id, both fire. Avoid scheduling other actions within a multi-frame command's range.
 

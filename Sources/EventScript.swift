@@ -10,7 +10,8 @@
 ///     20 move 100 200          — move pointer to (x, y) at frame 20
 ///     25 click 100 200         — click at (x, y) at frame 25
 ///     30 dblclick 100 200      — double-click at (x, y) (spans 2 frames)
-///     40 drag 100 200 300 200  — drag from→to over ~12 frames
+///     40 drag 100 200 300 200     — drag from→to (steps+2 frames, default 12)
+///     40 drag 100 200 300 200 20  — drag with 20 interpolation steps (22 frames)
 ///     55 capture /tmp/out.png  — capture screenshot at frame 55
 ///     60 exit                  — exit the hypervisor cleanly
 ///
@@ -19,7 +20,7 @@
 /// Multi-frame commands expand across consecutive frame_ids:
 ///   - type:     1 frame per character (e.g., "0 type hello" → frames 0-4)
 ///   - dblclick: 2 frames (click at N, click at N+1)
-///   - drag:     12 frames (press + 10 interpolation steps + release)
+///   - drag:     steps+2 frames (press + steps interpolation + release, default steps=10)
 ///
 /// If two commands target the same frame_id, both fire (actions are
 /// appended, not replaced). Avoid overlapping multi-frame ranges.
@@ -231,7 +232,7 @@ class EventSchedule {
                 ]
                 schedule.addActions(click2, at: frame + 1)
 
-            case .drag(let x1, let y1, let x2, let y2):
+            case .drag(let x1, let y1, let x2, let y2, let steps):
                 let pressEvents: [FrameAction] = [
                     .pointer(x: x1, y: y1),
                     .tabletSync,
@@ -240,7 +241,6 @@ class EventSchedule {
                 ]
                 schedule.addActions(pressEvents, at: frame)
                 frame += 1
-                let steps = 10
                 for i in 1...steps {
                     let t = Float(i) / Float(steps)
                     let x = x1 + (x2 - x1) * t
@@ -282,7 +282,7 @@ enum ScriptAction {
     case move(Float, Float)
     case click(Float, Float)
     case dblclick(Float, Float)
-    case drag(Float, Float, Float, Float) // x1, y1, x2, y2
+    case drag(Float, Float, Float, Float, Int) // x1, y1, x2, y2, steps
     case capture(String)
     case exit
 }
@@ -343,7 +343,8 @@ func parseEventScript(_ text: String) -> [(frameId: Int, action: ScriptAction)] 
             if coords.count >= 4,
                let x1 = Float(coords[0]), let y1 = Float(coords[1]),
                let x2 = Float(coords[2]), let y2 = Float(coords[3]) {
-                actions.append((frameId, .drag(x1, y1, x2, y2)))
+                let steps = coords.count >= 5 ? (Int(coords[4]) ?? 10) : 10
+                actions.append((frameId, .drag(x1, y1, x2, y2, steps)))
             }
         case "capture":
             let path = argStr.trimmingCharacters(in: .whitespaces)
