@@ -101,6 +101,13 @@ func virtqueuePushUsed(
     usedBase.storeBytes(of: UInt32(headIndex), toByteOffset: ringOffset, as: UInt32.self)
     usedBase.storeBytes(of: bytesWritten, toByteOffset: ringOffset + 4, as: UInt32.self)
 
-    // Increment used idx (with memory barrier for guest visibility)
+    // Store-release barrier: ensures the ring entry data above is visible to
+    // the guest before the updated index. Without this, ARM's weak memory
+    // ordering allows the guest (on another core) to see the new index but
+    // stale entry data. Critical when the host writes from a non-vCPU thread
+    // (e.g., VirtioInput event injection from the main thread).
+    OSMemoryBarrier()
+
+    // Increment used idx
     usedBase.storeBytes(of: usedIdx &+ 1, toByteOffset: 2, as: UInt16.self)
 }

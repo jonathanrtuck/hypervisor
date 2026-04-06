@@ -86,10 +86,10 @@ final class VCPU {
         // Note: CNTFRQ_EL0 is not a trappable sys reg in Hypervisor.framework.
         // The host's counter frequency is used directly by the guest.
 
-        // Virtual counter offset: CNTVCT_EL0 = mach_absolute_time() - vtimer_offset.
-        // Setting vtimer_offset to the boot timestamp makes the guest see
-        // time-since-VM-creation instead of time-since-host-boot.
-        try hvCheck(hv_vcpu_set_vtimer_offset(vcpuId, vm.bootTimestamp), "vtimer_offset[\(index)]")
+        // Virtual counter offset: CNTVCT_EL0 = CNTPCT_EL0 - vtimer_offset.
+        // Set to 0 so CNTVCT == CNTPCT, matching real hardware where the
+        // kernel zeroes CNTVOFF_EL2 during EL2→EL1 transition in boot.S.
+        try hvCheck(hv_vcpu_set_vtimer_offset(vcpuId, 0), "vtimer_offset[\(index)]")
 
         // Timer control: disabled initially
         try setSysReg(HV_SYS_REG_CNTV_CTL_EL0, 0)
@@ -280,11 +280,20 @@ final class VCPU {
         case 0x18:  // MSR/MRS trap (system register access)
             try handleSysRegTrap(syndrome)
 
-        case 0x01:  // WFI/WFE
-            // Guest executed WFI — the core is idle, waiting for an interrupt.
-            // Don't advance PC — the guest should re-execute WFI after waking.
-            // Brief sleep to avoid burning host CPU while guest is idle.
-            Thread.sleep(forTimeInterval: 0.001)  // 1ms
+        case 0x01:  // WFI/WFE trap
+            // ISS bit [0] (TI): 0 = WFI, 1 = WFE.
+            let isWFE = syndrome & 1 == 1
+
+            if !isWFE {
+                // WFI (Wait For Interrupt): guest is idle, waiting for an
+                // interrupt. Brief sleep to avoid burning host CPU.
+                Thread.sleep(forTimeInterval: 0.001)  // 1ms
+            }
+            // WFE (Wait For Event): return immediately. Used in spinlocks
+            // (WFE/SEV pattern) — sleeping here would make lock acquisition
+            // ~1000x slower than real hardware.
+
+            // Don't advance PC — the guest re-executes the hint instruction.
 
             // Check if timer needs unmasking (CVAL changed = guest re-armed).
             if timerMaskedByUs {
@@ -307,45 +316,64 @@ final class VCPU {
 
     // MARK: - Data abort (MMIO)
 
+    /// Read a guest GPR in load/store context. Register 31 is the zero register
+    /// (XZR), not SP — Hypervisor.framework returns SP for index 31, so this
+    /// must be special-cased.
+    private func readGPR(_ reg: Int) throws -> UInt64 {
+        if reg == 31 { return 0 }
+        return try getReg(hv_reg_t(rawValue: UInt32(reg)))
+    }
+
+    /// Write a guest GPR in load/store context. Writes to register 31 (XZR) are
+    /// silently discarded.
+    private func writeGPR(_ reg: Int, _ val: UInt64) throws {
+        if reg == 31 { return }
+        try setReg(hv_reg_t(rawValue: UInt32(reg)), val)
+    }
+
     private func handleDataAbort(_ syndrome: UInt64) throws {
-        let isWrite = (syndrome >> 6) & 1 == 1
-        let srt = Int((syndrome >> 16) & 0x1F)  // Transfer register
-        let accessSize = Int((syndrome >> 22) & 0x3)  // 0=byte, 1=u16, 2=u32, 3=u64
         let pa = exitInfo.pointee.exception.physical_address
-
         let pc = try getReg(HV_REG_PC)
+        let isv = (syndrome >> 24) & 1 == 1
 
-        // Helper: read the transfer register value. Register 31 in load/store
-        // context is the zero register (XZR/WZR), NOT the stack pointer.
-        // Hypervisor.framework's hv_vcpu_get_reg returns SP for index 31,
-        // so we must special-case it.
-        func readSrt() throws -> UInt64 {
-            if srt == 31 { return 0 }
-            return try getReg(hv_reg_t(rawValue: UInt32(srt)))
-        }
-        func writeSrt(_ val: UInt64) throws {
-            if srt == 31 { return }  // writes to XZR are discarded
-            try setReg(hv_reg_t(rawValue: UInt32(srt)), val)
+        if isv {
+            // Fast path: ESR syndrome contains register, size, and direction.
+            let isWrite = (syndrome >> 6) & 1 == 1
+            let reg = Int((syndrome >> 16) & 0x1F)
+            let accessSize = Int((syndrome >> 22) & 0x3)
+
+            guard try performMMIO(pa: pa, isWrite: isWrite, reg: reg, pc: pc) else {
+                print("vCPU[\(index)]: unhandled MMIO \(isWrite ? "write" : "read") " +
+                      "PA=0x\(String(pa, radix: 16)) size=\(1 << accessSize) " +
+                      "at PC=0x\(String(pc, radix: 16))")
+                running = false
+                return
+            }
+        } else {
+            // Slow path: ISV=0 — decode the faulting instruction to determine
+            // register(s), access size, and direction.
+            guard try decodeAndPerformMMIO(pa: pa, pc: pc) else {
+                return  // Error already logged, vCPU stopped.
+            }
         }
 
+        // Advance PC past the faulting instruction.
+        try setReg(HV_REG_PC, pc + 4)
+    }
+
+    /// Route a single MMIO access to the appropriate emulated device.
+    /// Returns true if handled, false if the address is not a known device.
+    private func performMMIO(pa: UInt64, isWrite: Bool, reg: Int, pc: UInt64) throws -> Bool {
         if pa >= UART_BASE && pa < UART_BASE + UART_SIZE {
-            // PL011 UART
             let offset = pa - UART_BASE
             if isWrite {
-                let val = try readSrt()
-                vm.uart.write(offset: offset, value: UInt32(val & 0xFFFF_FFFF))
+                vm.uart.write(offset: offset, value: UInt32(try readGPR(reg) & 0xFFFF_FFFF))
             } else {
-                let val = vm.uart.read(offset: offset)
-                try writeSrt(UInt64(val))
+                try writeGPR(reg, UInt64(vm.uart.read(offset: offset)))
             }
         } else if pa >= PL031_BASE && pa < PL031_BASE + PL031_SIZE {
             // PL031 RTC — read-only, returns host wall-clock time.
-            // Offset 0x000 (RTCDR): current time as Unix epoch seconds.
-            // All other offsets return 0 (we don't emulate match/load/control).
-            //
-            // Like QEMU's `-rtc base=localtime`, we add the local timezone
-            // offset so the guest's naive `epoch % 86400` math yields local
-            // hours/minutes/seconds rather than UTC.
+            // Like QEMU's `-rtc base=localtime`, we add the local timezone offset.
             if !isWrite {
                 let offset = pa - PL031_BASE
                 if offset == 0 {
@@ -353,22 +381,16 @@ final class VCPU {
                     var local = tm()
                     localtime_r(&now, &local)
                     let localEpoch = now + local.tm_gmtoff
-                    try writeSrt(UInt64(UInt32(truncatingIfNeeded: localEpoch)))
+                    try writeGPR(reg, UInt64(UInt32(truncatingIfNeeded: localEpoch)))
                 } else {
-                    try writeSrt(0)
+                    try writeGPR(reg, 0)
                 }
             }
         } else if pa >= PVPANIC_BASE && pa < PVPANIC_BASE + PVPANIC_SIZE {
-            // pvpanic — paravirtual panic notification (QEMU spec).
-            // Write 0x01 = kernel panic. The kernel signals this after finishing
-            // its diagnostic output, so the serial log is already complete.
             let offset = pa - PVPANIC_BASE
             if isWrite {
-                let val = try readSrt()
+                let val = try readGPR(reg)
                 if vm.pvpanic.write(offset: offset, value: UInt32(val & 0xFF)) {
-                    // Kernel signaled panic — capture state, write report, exit.
-                    // This is the authoritative panic signal (vs UART detection
-                    // which is a heuristic fallback).
                     if let snapshot = captureSnapshot(exitCount: exitCount) {
                         let path = writeCrashReport(
                             snapshot: snapshot,
@@ -384,55 +406,310 @@ final class VCPU {
                     exit(1)
                 }
             } else {
-                let val = vm.pvpanic.read(offset: offset)
-                try writeSrt(UInt64(val))
+                try writeGPR(reg, UInt64(vm.pvpanic.read(offset: offset)))
             }
         } else if pa >= GIC_DIST_BASE && pa < GIC_DIST_BASE + 0x10000 {
-            // GIC distributor — handled by Apple's hv_gic hardware emulation.
-            // This shouldn't be reached if hv_gic_create was called.
-            if vm.verbose {
-                let rw = isWrite ? "W" : "R"
-                print("  GIC DIST \(rw) offset=0x\(String(pa - GIC_DIST_BASE, radix: 16)) at PC=0x\(String(pc, radix: 16))")
-            }
+            // GIC distributor — should be handled by hv_gic. If we reach here,
+            // hv_gic didn't handle this register. Always log — returning 0
+            // could mask GIC initialization failures.
+            let rw = isWrite ? "W" : "R"
+            print("vCPU[\(index)]: GIC DIST fallback \(rw) offset=0x\(String(pa - GIC_DIST_BASE, radix: 16)) at PC=0x\(String(pc, radix: 16))")
             if !isWrite {
-                try writeSrt(0)
+                try writeGPR(reg, 0)
             }
         } else if pa >= GIC_REDIST_BASE && pa < GIC_REDIST_BASE + 0x100000 {
-            // GIC redistributor — handled by Apple's hv_gic hardware emulation.
+            let rw = isWrite ? "W" : "R"
+            print("vCPU[\(index)]: GIC REDIST fallback \(rw) offset=0x\(String(pa - GIC_REDIST_BASE, radix: 16)) at PC=0x\(String(pc, radix: 16))")
             if !isWrite {
-                try writeSrt(0)
+                try writeGPR(reg, 0)
             }
         } else if pa >= VIRTIO_BASE && pa < VIRTIO_BASE + VIRTIO_SIZE {
-            // Virtio MMIO — dispatch to registered transports
             if let (transport, regOffset) = vm.virtioTransport(for: pa) {
                 if isWrite {
-                    let val = try readSrt()
+                    let val = try readGPR(reg)
                     transport.write(offset: regOffset, value: UInt32(val & 0xFFFF_FFFF))
-
-                    // After QUEUE_NOTIFY or any write that may generate a response,
-                    // check if the device raised an interrupt and inject SPI via GIC.
                     if transport.interruptStatus != 0 {
                         hv_gic_set_spi(transport.irq, true)
                     }
                 } else {
-                    let val = transport.read(offset: regOffset)
-                    try writeSrt(UInt64(val))
+                    try writeGPR(reg, UInt64(transport.read(offset: regOffset)))
                 }
             } else {
-                // No device at this slot — return 0 (device_id=0 means empty)
                 if !isWrite {
-                    try writeSrt(0)
+                    try writeGPR(reg, 0)
                 }
             }
         } else {
-            print("vCPU[\(index)]: unhandled MMIO \(isWrite ? "write" : "read") " +
-                  "PA=0x\(String(pa, radix: 16)) size=\(1 << accessSize) at PC=0x\(String(pc, radix: 16))")
-            running = false
-            return
+            return false
+        }
+        return true
+    }
+
+    // MARK: - ISV=0 instruction decoding
+
+    /// Translate a guest virtual address to physical address by walking the
+    /// guest's stage-1 page tables (TTBR0/TTBR1 → 4-level descriptor walk).
+    ///
+    /// Returns the VA unchanged when the MMU is disabled (SCTLR_EL1.M = 0).
+    /// Returns nil if the walk encounters an invalid descriptor.
+    ///
+    /// Only supports 4KB granule — the standard on Apple Silicon for both
+    /// macOS and Linux guests. Logs a warning and falls back to VA == PA
+    /// for unsupported granule sizes.
+    private func translateGuestVA(_ va: UInt64) throws -> UInt64? {
+        let sctlr = try getSysReg(HV_SYS_REG_SCTLR_EL1)
+
+        // MMU disabled — VA == PA.
+        if sctlr & 1 == 0 {
+            return va
         }
 
-        // Advance PC past the faulting instruction
-        try setReg(HV_REG_PC, pc + 4)
+        let tcr = try getSysReg(HV_SYS_REG_TCR_EL1)
+        let isKernelVA = (va >> 63) & 1 == 1
+
+        let ttbr: UInt64
+        let tsz: Int
+        let granuleOK: Bool
+
+        if isKernelVA {
+            ttbr = try getSysReg(HV_SYS_REG_TTBR1_EL1)
+            tsz = Int((tcr >> 16) & 0x3F)  // T1SZ
+            granuleOK = ((tcr >> 30) & 0x3) == 0b10  // TG1: 10 = 4KB
+        } else {
+            ttbr = try getSysReg(HV_SYS_REG_TTBR0_EL1)
+            tsz = Int(tcr & 0x3F)  // T0SZ
+            granuleOK = ((tcr >> 14) & 0x3) == 0b00  // TG0: 00 = 4KB
+        }
+
+        if !granuleOK {
+            print("vCPU[\(index)]: VA translation: unsupported granule in TCR " +
+                  "0x\(String(tcr, radix: 16)), falling back to VA==PA " +
+                  "for 0x\(String(va, radix: 16))")
+            return va
+        }
+
+        let vaBits = 64 - tsz
+        // Start level depends on VA width. Each level resolves 9 bits.
+        // 4KB: L0 covers [47:39], L1 [38:30], L2 [29:21], L3 [20:12].
+        let startLevel: Int
+        if vaBits <= 30 { startLevel = 3 }
+        else if vaBits <= 39 { startLevel = 2 }
+        else { startLevel = 1 }
+
+        // Table base from TTBR (bits [47:12], ignoring ASID and CnP).
+        var tablePA = ttbr & 0x0000_FFFF_FFFF_F000
+
+        for level in startLevel...3 {
+            let shift = 12 + (3 - level) * 9  // 39, 30, 21, 12
+            let index = Int((va >> shift) & 0x1FF)
+            let pteAddr = tablePA &+ UInt64(index * 8)
+
+            guard let ptePtr = vm.guestToHost(pteAddr) else { return nil }
+            let pte = ptePtr.load(as: UInt64.self)
+
+            // Valid bit [0] must be set.
+            guard pte & 1 == 1 else { return nil }
+
+            if level < 3 && (pte & 2 == 0) {
+                // Block descriptor — OA from PTE, low bits from VA.
+                let blockMask = (UInt64(1) << shift) - 1
+                return (pte & 0x0000_FFFF_FFFF_F000 & ~blockMask) | (va & blockMask)
+            }
+
+            if level == 3 {
+                // Page descriptor at L3 — bit[1] must be 1.
+                guard pte & 2 == 2 else { return nil }
+                return (pte & 0x0000_FFFF_FFFF_F000) | (va & 0xFFF)
+            }
+
+            // Table descriptor — descend to next level.
+            tablePA = pte & 0x0000_FFFF_FFFF_F000
+        }
+
+        return nil
+    }
+
+    /// Decode the faulting load/store instruction and perform MMIO operation(s).
+    ///
+    /// Called when the ESR syndrome has ISV=0, meaning the hardware did not
+    /// provide register/size/direction information. Translates PC (VA) to PA
+    /// via a stage-1 page table walk, fetches the instruction, and decodes it.
+    ///
+    /// Handles LDP/STP (the primary ISV=0 case on Apple Silicon) and
+    /// pre/post-index LDR/STR. SIMD/FP load/stores and exclusives are not
+    /// supported — they are architecturally unpredictable on Device memory.
+    private func decodeAndPerformMMIO(pa: UInt64, pc: UInt64) throws -> Bool {
+        // Translate PC (a virtual address) to physical address. When the guest
+        // MMU is enabled, PC may map to a different PA than its numeric value.
+        guard let instrPA = try translateGuestVA(pc) else {
+            print("vCPU[\(index)]: ISV=0 data abort at PC=0x\(String(pc, radix: 16)): " +
+                  "VA→PA translation failed (invalid page table entry)")
+            running = false
+            return false
+        }
+
+        guard let hostPtr = vm.guestToHost(instrPA) else {
+            print("vCPU[\(index)]: ISV=0 data abort at PC=0x\(String(pc, radix: 16)) " +
+                  "(PA=0x\(String(instrPA, radix: 16))): instruction outside guest RAM")
+            running = false
+            return false
+        }
+
+        let insn = hostPtr.load(as: UInt32.self)
+
+        // LDP/STP (GPR pair): bits [29:27] = 101, bit [26] = 0 (not SIMD)
+        if (insn >> 27) & 0b111 == 0b101 && (insn >> 26) & 1 == 0 {
+            return try decodeLdpStp(insn: insn, pa: pa, pc: pc)
+        }
+
+        // LDR/STR pre/post-index: bits [29:27] = 111, [25:24] = 00, [21] = 0,
+        // bit [26] = 0 (not SIMD), [11:10] = 01 (post) or 11 (pre)
+        if (insn >> 27) & 0b111 == 0b111 && (insn >> 24) & 0b11 == 0b00 &&
+           (insn >> 21) & 1 == 0 && (insn >> 26) & 1 == 0 {
+            let indexType = (insn >> 10) & 0b11
+            if indexType == 0b01 || indexType == 0b11 {
+                return try decodeLdrStrIndexed(insn: insn, pa: pa, pc: pc)
+            }
+        }
+
+        print("vCPU[\(index)]: ISV=0 data abort: cannot decode instruction " +
+              "0x\(String(insn, radix: 16)) at PC=0x\(String(pc, radix: 16))")
+        running = false
+        return false
+    }
+
+    /// Decode and emulate LDP/STP (load/store pair, GPR).
+    ///
+    /// Encoding: `opc[31:30] 101 V[26] type[25:23] L[22] imm7[21:15] Rt2[14:10] Rn[9:5] Rt[4:0]`
+    ///
+    /// Emulates both element accesses and applies base register writeback for
+    /// pre/post-index forms.
+    ///
+    /// Note: the two pair elements are emulated as separate MMIO accesses.
+    /// If the first succeeds but the second targets an unhandled address,
+    /// the first access cannot be rolled back. This matches ARM architecture
+    /// (LDP/STP to Device memory is architecturally UNPREDICTABLE).
+    private func decodeLdpStp(insn: UInt32, pa: UInt64, pc: UInt64) throws -> Bool {
+        let opc = (insn >> 30) & 0b11
+        let indexType = (insn >> 23) & 0b111
+        let isLoad = (insn >> 22) & 1 == 1
+        let imm7Raw = Int32(bitPattern: (insn >> 15) & 0x7F)
+        let rt2 = Int((insn >> 10) & 0x1F)
+        let rn = Int((insn >> 5) & 0x1F)
+        let rt = Int(insn & 0x1F)
+
+        // Element size from opc: 00 = 32-bit, 10 = 64-bit, 01 = LDPSW (32-bit sign-extended)
+        let elementSize: Int
+        let signExtend: Bool
+        switch opc {
+        case 0b00:
+            elementSize = 4; signExtend = false
+        case 0b01 where isLoad:
+            elementSize = 4; signExtend = true   // LDPSW
+        case 0b10:
+            elementSize = 8; signExtend = false
+        default:
+            print("vCPU[\(index)]: LDP/STP reserved opc=\(opc) " +
+                  "at PC=0x\(String(pc, radix: 16))")
+            running = false
+            return false
+        }
+
+        // First element: Rt at PA.
+        guard try performMMIO(pa: pa, isWrite: !isLoad, reg: rt, pc: pc) else {
+            print("vCPU[\(index)]: unhandled MMIO in LDP/STP " +
+                  "at PA=0x\(String(pa, radix: 16))")
+            running = false
+            return false
+        }
+        if isLoad && signExtend {
+            let raw = try readGPR(rt)
+            try writeGPR(rt, UInt64(bitPattern: Int64(Int32(truncatingIfNeeded: raw))))
+        }
+
+        // Second element: Rt2 at PA + element_size.
+        let pa2 = pa &+ UInt64(elementSize)
+        guard try performMMIO(pa: pa2, isWrite: !isLoad, reg: rt2, pc: pc) else {
+            print("vCPU[\(index)]: unhandled MMIO in LDP/STP " +
+                  "at PA=0x\(String(pa2, radix: 16))")
+            running = false
+            return false
+        }
+        if isLoad && signExtend {
+            let raw = try readGPR(rt2)
+            try writeGPR(rt2, UInt64(bitPattern: Int64(Int32(truncatingIfNeeded: raw))))
+        }
+
+        // Base register writeback for pre/post-index forms.
+        // type 001 = post-index, 011 = pre-index (both writeback)
+        // type 000 = non-temporal, 010 = signed-offset (no writeback)
+        if indexType == 0b001 || indexType == 0b011 {
+            let signedImm = (imm7Raw << 25) >> 25  // sign-extend 7-bit
+            let offset = Int64(signedImm) * Int64(elementSize)
+            let base = try readGPR(rn)
+            try writeGPR(rn, UInt64(bitPattern: Int64(bitPattern: base) &+ offset))
+        }
+
+        return true
+    }
+
+    /// Decode and emulate LDR/STR with pre/post-index writeback.
+    ///
+    /// Encoding: `size[31:30] 111 V[26] 00 opc[23:22] 0 imm9[20:12] type[11:10] Rn[9:5] Rt[4:0]`
+    ///
+    /// opc: 00 = store, 01 = unsigned load, 10 = signed load → Xt (or PRFM
+    /// when size=11), 11 = signed load → Wt.
+    ///
+    /// On ARMv8.2+ (Apple Silicon), simple LDR/STR set ISV=1, so this path
+    /// is a safety net. But it must be correct for signed loads (LDRSB, LDRSH,
+    /// LDRSW) which sign-extend the result based on the access size.
+    private func decodeLdrStrIndexed(insn: UInt32, pa: UInt64, pc: UInt64) throws -> Bool {
+        let size = Int((insn >> 30) & 0b11)  // 0=byte, 1=halfword, 2=word, 3=doubleword
+        let opc = (insn >> 22) & 0b11
+        let imm9Raw = Int32(bitPattern: (insn >> 12) & 0x1FF)
+        let rn = Int((insn >> 5) & 0x1F)
+        let rt = Int(insn & 0x1F)
+
+        let isStore = opc == 0b00
+
+        // PRFM (prefetch memory hint) — size=11, opc=10. No register transfer;
+        // skip the MMIO access but still perform writeback.
+        let isPrefetch = size == 3 && opc == 0b10
+
+        if !isPrefetch {
+            guard try performMMIO(pa: pa, isWrite: isStore, reg: rt, pc: pc) else {
+                print("vCPU[\(index)]: unhandled MMIO in indexed LDR/STR " +
+                      "at PA=0x\(String(pa, radix: 16))")
+                running = false
+                return false
+            }
+
+            // Sign extension for LDRS* variants (opc >= 10).
+            if !isStore && opc >= 0b10 {
+                let raw = try readGPR(rt)
+                let accessBits = 8 << size  // 8, 16, 32
+                if accessBits < 64 {
+                    // Arithmetic left-shift then right-shift to sign-extend.
+                    let shift = 64 - accessBits
+                    let extended = UInt64(bitPattern: (Int64(bitPattern: raw) << shift) >> shift)
+                    if opc == 0b11 {
+                        // Wt destination — zero upper 32 bits.
+                        try writeGPR(rt, extended & 0xFFFF_FFFF)
+                    } else {
+                        try writeGPR(rt, extended)
+                    }
+                }
+            }
+        }
+
+        // Writeback: Rn = Rn + SignExtend(imm9).
+        // Unlike unsigned-offset LDR/STR, the pre/post-index immediate is a
+        // raw byte offset (not scaled by access size).
+        let signedImm = (imm9Raw << 23) >> 23  // sign-extend 9-bit
+        let base = try readGPR(rn)
+        try writeGPR(rn, UInt64(bitPattern: Int64(bitPattern: base) &+ Int64(signedImm)))
+
+        return true
     }
 
     // MARK: - HVC (PSCI)
@@ -524,18 +801,23 @@ final class VCPU {
         let op0 = (syndrome >> 20) & 0x3
         let pc = try getReg(HV_REG_PC)
 
-        // ICC_* (GICv3 CPU interface) — stub for Phase 1
-        // The kernel will try to initialize the GIC; return 0 for reads.
+        // Catch-all: return 0 for reads, ignore writes. This handles system
+        // registers that HVF traps but doesn't emulate natively (the hardware
+        // GIC handles ICC_* registers via hv_gic_create, and EL1 registers
+        // like SCTLR/TCR/TTBR are passed through without trapping).
+        //
+        // Always log — a trapped register that reaches this handler means
+        // the guest read/wrote something the hypervisor doesn't understand.
+        // Silent 0 returns are the hardest bugs to debug.
+        let dir = isRead ? "MRS" : "MSR"
+        let regName = "S\(op0)_\(op1)_C\(crn)_C\(crm)_\(op2)"
+        print("vCPU[\(index)]: unhandled \(dir) \(regName) " +
+              "(rt=x\(rt)) at PC=0x\(String(pc, radix: 16))")
+
         if isRead {
             if rt != 31 {
                 try setReg(hv_reg_t(rawValue: UInt32(rt)), 0)
             }
-        }
-
-        if vm.verbose {
-            let dir = isRead ? "MRS" : "MSR"
-            print("  \(dir) op0=\(op0) op1=\(op1) crn=\(crn) crm=\(crm) op2=\(op2) " +
-                  "at PC=0x\(String(pc, radix: 16))")
         }
 
         // Advance PC

@@ -22,8 +22,10 @@ final class PL011 {
     private static let ICR:  UInt64 = 0x44  // Interrupt clear
 
     /// Flag register bits
+    private static let FR_TXFE: UInt32 = 1 << 7  // TX FIFO empty
     private static let FR_TXFF: UInt32 = 1 << 5  // TX FIFO full
     private static let FR_RXFE: UInt32 = 1 << 4  // RX FIFO empty
+    private static let FR_CTS:  UInt32 = 1 << 0  // Clear to send
 
     /// Total bytes transmitted (for diagnostics)
     private(set) var txCount: Int = 0
@@ -81,8 +83,10 @@ final class PL011 {
             return 0
 
         case PL011.FR:
-            // TX FIFO never full (always ready), RX FIFO always empty
-            return PL011.FR_RXFE
+            // Match real PL011 flag state for an idle, empty UART:
+            // TXFE=1 (TX done), TXFF=0 (not full), RXFE=1 (no RX data),
+            // BUSY=0 (not transmitting), CTS=1 (clear to send).
+            return PL011.FR_TXFE | PL011.FR_RXFE | PL011.FR_CTS
 
         default:
             return 0

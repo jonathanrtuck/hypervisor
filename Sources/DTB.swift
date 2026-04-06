@@ -25,9 +25,11 @@ enum DTB {
         let deviceId: UInt32
     }
 
-    /// Generate a DTB with memory, UART, PSCI, CPUs, and virtio devices.
+    /// Generate a DTB with memory, GIC, timer, UART, PSCI, CPUs, and virtio devices.
     static func minimal(ramBase: UInt64, ramSize: Int, cpuCount: Int = 4, virtioDevices: [DeviceInfo] = []) -> Data {
         var b = FDTBuilder()
+
+        let gicPhandle: UInt32 = 1
 
         // Root node
         b.beginNode("")
@@ -35,11 +37,35 @@ enum DTB {
         b.prop_u32("#size-cells", 2)
         b.prop_string("compatible", "linux,dummy-virt")
         b.prop_string("model", "hypervisor-virt")
+        b.prop_u32("interrupt-parent", gicPhandle)
 
         // Memory node
         b.beginNode("memory@\(String(ramBase, radix: 16))")
         b.prop_string("device_type", "memory")
         b.prop_reg(ramBase, UInt64(ramSize))
+        b.endNode()
+
+        // GICv3 interrupt controller — describes the hardware GIC created
+        // by hv_gic_create(). The kernel can discover GIC base addresses
+        // from this node instead of hardcoding them.
+        b.beginNode("intc@8000000")
+        b.prop_string("compatible", "arm,gic-v3")
+        b.prop_u32("#interrupt-cells", 3)
+        b.prop_empty("interrupt-controller")
+        b.prop_reg2(0x0800_0000, 0x10000, 0x080A_0000, 0x100000)
+        b.prop_u32("phandle", gicPhandle)
+        b.endNode()
+
+        // ARM generic timer — describes the 4 timer PPIs. The virtual timer
+        // (PPI 11 = INTID 27) is the one the kernel uses.
+        b.beginNode("timer")
+        b.prop_string("compatible", "arm,armv8-timer")
+        b.prop_interrupts_multi([
+            (type: 1, number: 13, flags: 4),  // Secure physical timer
+            (type: 1, number: 14, flags: 4),  // Non-secure physical timer
+            (type: 1, number: 11, flags: 4),  // Virtual timer
+            (type: 1, number: 10, flags: 4),  // Hypervisor timer
+        ])
         b.endNode()
 
         // UART (PL011) node
@@ -50,17 +76,12 @@ enum DTB {
         b.endNode()
 
         // PL031 RTC node — provides wall-clock time from the host.
-        // The kernel probes for "arm,pl031" in the DTB and passes the
-        // MMIO address to core, which reads offset 0x000 (RTCDR) for
-        // epoch seconds.
         b.beginNode("pl031@9010000")
         b.prop_string("compatible", "arm,pl031\0arm,primecell")
         b.prop_reg(0x0901_0000, 0x1000)
         b.endNode()
 
         // pvpanic node — paravirtual panic notification device.
-        // The guest kernel writes 0x01 to this MMIO register to signal panic,
-        // allowing the hypervisor to capture state and write a crash report.
         b.beginNode("pvpanic@9020000")
         b.prop_string("compatible", "qemu,pvpanic-mmio")
         b.prop_reg(0x0902_0000, 0x2)
@@ -84,7 +105,6 @@ enum DTB {
         for i in 0..<cpuCount {
             b.beginNode("cpu@\(i)")
             b.prop_string("device_type", "cpu")
-            b.prop_string("compatible", "arm,cortex-a53")
             b.prop_u32("reg", UInt32(i))
             b.prop_string("enable-method", "psci")
             b.endNode()
@@ -145,25 +165,58 @@ private struct FDTBuilder {
         alignTo4()
     }
 
+    /// Property with no value — used for flag properties like `interrupt-controller`.
+    mutating func prop_empty(_ name: String) {
+        let nameOff = addString(name)
+        appendU32(0x0000_0003)  // FDT_PROP
+        appendU32(0)             // len = 0
+        appendU32(nameOff)
+    }
+
     /// Property with GIC interrupt specifier (3 cells: type, number, flags).
     mutating func prop_interrupts(type: UInt32, number: UInt32, flags: UInt32) {
         let nameOff = addString("interrupts")
         appendU32(0x0000_0003)  // FDT_PROP
-        appendU32(12)           // len = 3 × 4 bytes
+        appendU32(12)           // len = 3 x 4 bytes
         appendU32(nameOff)
         appendU32(type)         // 0=SPI, 1=PPI
         appendU32(number)       // Interrupt number (for SPI: offset from 32)
         appendU32(flags)        // 1=edge-rising, 4=level-high
     }
 
+    /// Property with multiple GIC interrupt specifiers (3 cells each).
+    mutating func prop_interrupts_multi(_ specs: [(type: UInt32, number: UInt32, flags: UInt32)]) {
+        let nameOff = addString("interrupts")
+        appendU32(0x0000_0003)  // FDT_PROP
+        appendU32(UInt32(specs.count * 12))
+        appendU32(nameOff)
+        for spec in specs {
+            appendU32(spec.type)
+            appendU32(spec.number)
+            appendU32(spec.flags)
+        }
+    }
+
     /// Property with a reg entry (address + size, both 64-bit for #cells=2).
     mutating func prop_reg(_ address: UInt64, _ size: UInt64) {
         let nameOff = addString("reg")
         appendU32(0x0000_0003)  // FDT_PROP
-        appendU32(16)           // len = 2×8 bytes (two 64-bit values)
+        appendU32(16)           // len = 2x8 bytes (two 64-bit values)
         appendU32(nameOff)
         appendU64(address)
         appendU64(size)
+    }
+
+    /// Property with two reg entries (e.g., GIC distributor + redistributor).
+    mutating func prop_reg2(_ addr1: UInt64, _ size1: UInt64, _ addr2: UInt64, _ size2: UInt64) {
+        let nameOff = addString("reg")
+        appendU32(0x0000_0003)  // FDT_PROP
+        appendU32(32)           // len = 4x8 bytes
+        appendU32(nameOff)
+        appendU64(addr1)
+        appendU64(size1)
+        appendU64(addr2)
+        appendU64(size2)
     }
 
     mutating func finish() -> Data {

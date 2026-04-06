@@ -9,32 +9,33 @@
 /// available buffers.
 
 import Foundation
+import Hypervisor
 
 // MARK: - Virtio MMIO register offsets
 
-private let REG_MAGIC:             UInt64 = 0x000
-private let REG_VERSION:           UInt64 = 0x004
-private let REG_DEVICE_ID:         UInt64 = 0x008
-private let REG_VENDOR_ID:         UInt64 = 0x00C
-private let REG_DEVICE_FEATURES:   UInt64 = 0x010
+private let REG_MAGIC:               UInt64 = 0x000
+private let REG_VERSION:             UInt64 = 0x004
+private let REG_DEVICE_ID:           UInt64 = 0x008
+private let REG_VENDOR_ID:           UInt64 = 0x00C
+private let REG_DEVICE_FEATURES:     UInt64 = 0x010
 private let REG_DEVICE_FEATURES_SEL: UInt64 = 0x014
-private let REG_DRIVER_FEATURES:   UInt64 = 0x020
+private let REG_DRIVER_FEATURES:     UInt64 = 0x020
 private let REG_DRIVER_FEATURES_SEL: UInt64 = 0x024
-private let REG_QUEUE_SEL:         UInt64 = 0x030
-private let REG_QUEUE_NUM_MAX:     UInt64 = 0x034
-private let REG_QUEUE_NUM:         UInt64 = 0x038
-private let REG_QUEUE_READY:       UInt64 = 0x044
-private let REG_QUEUE_NOTIFY:      UInt64 = 0x050
-private let REG_INTERRUPT_STATUS:  UInt64 = 0x060
-private let REG_INTERRUPT_ACK:     UInt64 = 0x064
-private let REG_STATUS:            UInt64 = 0x070
-private let REG_QUEUE_DESC_LOW:    UInt64 = 0x080
-private let REG_QUEUE_DESC_HIGH:   UInt64 = 0x084
-private let REG_QUEUE_DRIVER_LOW:  UInt64 = 0x090
-private let REG_QUEUE_DRIVER_HIGH: UInt64 = 0x094
-private let REG_QUEUE_DEVICE_LOW:  UInt64 = 0x0A0
-private let REG_QUEUE_DEVICE_HIGH: UInt64 = 0x0A4
-private let REG_CONFIG_BASE:       UInt64 = 0x100
+private let REG_QUEUE_SEL:           UInt64 = 0x030
+private let REG_QUEUE_NUM_MAX:       UInt64 = 0x034
+private let REG_QUEUE_NUM:           UInt64 = 0x038
+private let REG_QUEUE_READY:         UInt64 = 0x044
+private let REG_QUEUE_NOTIFY:        UInt64 = 0x050
+private let REG_INTERRUPT_STATUS:    UInt64 = 0x060
+private let REG_INTERRUPT_ACK:       UInt64 = 0x064
+private let REG_STATUS:              UInt64 = 0x070
+private let REG_QUEUE_DESC_LOW:      UInt64 = 0x080
+private let REG_QUEUE_DESC_HIGH:     UInt64 = 0x084
+private let REG_QUEUE_DRIVER_LOW:    UInt64 = 0x090
+private let REG_QUEUE_DRIVER_HIGH:   UInt64 = 0x094
+private let REG_QUEUE_DEVICE_LOW:    UInt64 = 0x0A0
+private let REG_QUEUE_DEVICE_HIGH:   UInt64 = 0x0A4
+private let REG_CONFIG_BASE:         UInt64 = 0x100
 
 // Status bits
 private let STATUS_ACKNOWLEDGE: UInt32 = 1
@@ -251,12 +252,22 @@ final class VirtioMMIOTransport {
         }
     }
 
-    /// Raise an interrupt (set status bit, to be delivered to guest via GIC).
+    /// Raise an interrupt: set the transport status bit AND inject the SPI
+    /// into the hardware GIC so the guest is interrupted immediately.
+    ///
     /// Thread-safe: may be called from vCPU threads or the main (AppKit) thread.
+    /// `hv_gic_set_spi` is a VM-wide API safe to call from any thread.
     func raiseInterrupt() {
         interruptLock.lock()
         _interruptStatus |= 1  // Used buffer notification
         interruptLock.unlock()
+
+        // Inject the SPI directly into the hardware GIC. Without this, the
+        // guest would only learn about the interrupt on its next MMIO write
+        // (when the vCPU exit handler checks interruptStatus). For host-
+        // initiated events (keyboard, mouse), the guest could be in WFI
+        // with no MMIO traffic — the interrupt would never arrive.
+        hv_gic_set_spi(irq, true)
     }
 
     /// Acknowledge (clear) interrupt bits. Called from guest MMIO write.
