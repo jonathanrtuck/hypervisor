@@ -70,7 +70,7 @@ make sign
 
 The example reads display dimensions from the virtio-metal config space, so it renders at native resolution in both windowed and fullscreen modes.
 
-The example is ~550 lines with zero dependencies — boots, initializes virtio, compiles MSL shaders, and draws a triangle via the Metal protocol. Read the source for a walkthrough of how to build a guest driver.
+The example is ~700 lines with zero dependencies — boots, initializes virtio, compiles MSL shaders, and draws a triangle via the Metal protocol. Read the source for a walkthrough of how to build a guest driver.
 
 ## usage
 
