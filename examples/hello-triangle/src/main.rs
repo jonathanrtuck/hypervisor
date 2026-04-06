@@ -111,6 +111,7 @@ const VIRTIO_QUEUE_DRIVER_LOW: usize = 0x090;
 const VIRTIO_QUEUE_DRIVER_HIGH: usize = 0x094;
 const VIRTIO_QUEUE_USED_LOW: usize = 0x0A0;
 const VIRTIO_QUEUE_USED_HIGH: usize = 0x0A4;
+const VIRTIO_CONFIG_BASE: usize = 0x100;
 
 // Virtio status bits
 const STATUS_ACKNOWLEDGE: u32 = 1;
@@ -580,8 +581,6 @@ const FN_FRAGMENT: u32 = 11;
 const PIPE_SOLID: u32 = 20;
 const TEX_MSAA: u32 = 50;
 
-const DISPLAY_W: u16 = 1024;
-const DISPLAY_H: u16 = 768;
 const SAMPLE_COUNT: u8 = 4;
 
 // ── Entry point ───────────────────────────────────────────────────────────
@@ -598,6 +597,10 @@ pub extern "C" fn main() {
         return;
     }
     uart_print(b"  Virtio device ready\n");
+
+    // Read display dimensions from virtio-metal config space.
+    let display_w = mmio_read32(VIRTIO_SLOT_3_BASE + VIRTIO_CONFIG_BASE) as u16;
+    let display_h = mmio_read32(VIRTIO_SLOT_3_BASE + VIRTIO_CONFIG_BASE + 4) as u16;
 
     // ── Setup phase: compile shaders and create pipeline ────────────────
 
@@ -616,7 +619,7 @@ pub extern "C" fn main() {
 
         // 3. Create 4x MSAA texture (render target)
         //    format=1 (BGRA8), usage=4 (renderTarget)
-        enc.create_texture(TEX_MSAA, DISPLAY_W, DISPLAY_H, 1, SAMPLE_COUNT, 4);
+        enc.create_texture(TEX_MSAA, display_w, display_h, 1, SAMPLE_COUNT, 4);
 
         // 4. Create render pipeline with 4x MSAA
         //    pixel_format=1 (BGRA8Unorm) — must match the resolve texture format
