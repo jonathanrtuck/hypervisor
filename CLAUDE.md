@@ -33,7 +33,7 @@ make run KERNEL=examples/hello-triangle/target/aarch64-unknown-none/release/hell
   ARGS="--windowed --capture 0 /tmp/test.png --timeout 10"
 ```
 
-Compare background vs foreground captures with `shasum -a 256` to verify pixel-identical output. Expected: RGB gradient triangle on a dark background (top-left quadrant), rest white/uninitialized.
+Compare background vs foreground captures with `shasum -a 256` to verify pixel-identical output. Expected: RGB gradient triangle centered on a dark background, filling the full framebuffer.
 
 If the kernel needs rebuilding: `cd examples/hello-triangle && cargo build --release`
 
