@@ -15,8 +15,14 @@
 ///     60 exit                  — exit the hypervisor cleanly
 ///
 /// Lines starting with # are comments. Blank lines are ignored.
-/// Multi-frame commands (type, drag, dblclick) expand across
-/// consecutive frame_ids starting from the specified one.
+///
+/// Multi-frame commands expand across consecutive frame_ids:
+///   - type:     1 frame per character (e.g., "0 type hello" → frames 0-4)
+///   - dblclick: 2 frames (click at N, click at N+1)
+///   - drag:     12 frames (press + 10 interpolation steps + release)
+///
+/// If two commands target the same frame_id, both fire (actions are
+/// appended, not replaced). Avoid overlapping multi-frame ranges.
 
 import Foundation
 

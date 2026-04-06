@@ -161,7 +161,12 @@ Each line specifies a frame_id and a command. Frame_ids correspond to the guest'
 55 exit                   # Exit the hypervisor cleanly
 ```
 
-Multi-frame commands (`type`, `drag`, `dblclick`) expand across consecutive frame_ids starting from the specified one.
+Multi-frame commands expand across consecutive frame_ids starting from the specified one:
+- `type` — 1 frame per character (e.g., `0 type hello` uses frames 0-4)
+- `dblclick` — 2 frames (click at N, click at N+1)
+- `drag` — 12 frames (press + 10 interpolation steps + release)
+
+If two commands overlap on the same frame_id, both fire. Avoid scheduling other actions within a multi-frame command's range.
 
 ## architecture
 
