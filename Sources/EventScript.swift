@@ -18,7 +18,8 @@
 /// Lines starting with # are comments. Blank lines are ignored.
 ///
 /// Multi-frame commands expand across consecutive frame_ids:
-///   - type:     1 frame per character (e.g., "0 type hello" → frames 0-4)
+///   - type:     1 frame per mapped ASCII character (a-z, A-Z, 0-9, space,
+///               common punctuation). Unmapped characters are skipped with a warning.
 ///   - dblclick: 2 frames (click at N, click at N+1)
 ///   - drag:     steps+2 frames (press + steps interpolation + release, default steps=10)
 ///
@@ -156,7 +157,10 @@ class EventSchedule {
             switch action {
             case .type(let text):
                 for ch in text {
-                    guard let (code, shift) = charToKey(ch) else { continue }
+                    guard let (code, shift) = charToKey(ch) else {
+                        print("EventScript: type: skipping unmapped character '\(ch)' (U+\(String(ch.unicodeScalars.first!.value, radix: 16, uppercase: true)))")
+                        continue
+                    }
                     var events: [FrameAction] = []
                     if shift {
                         events.append(.keyboard(type: EV_KEY, code: 42, value: 1)) // LEFTSHIFT down

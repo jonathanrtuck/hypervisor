@@ -163,7 +163,7 @@ Each line specifies a frame_id and a command. Frame_ids correspond to the guest'
 ```
 
 Multi-frame commands expand across consecutive frame_ids starting from the specified one:
-- `type` — 1 frame per character (e.g., `0 type hello` uses frames 0-4)
+- `type` — 1 frame per mapped ASCII character (a-z, A-Z, 0-9, space, common punctuation; unmapped chars are skipped with a warning)
 - `dblclick` — 2 frames (click at N, click at N+1)
 - `drag` — steps+2 frames (press + interpolation + release; default 10 steps = 12 frames; optional 5th arg overrides)
 
