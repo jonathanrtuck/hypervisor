@@ -39,7 +39,7 @@ If the kernel needs rebuilding: `cd examples/hello-triangle && cargo build --rel
 
 ## Architecture
 
-This is a native macOS ARM64 hypervisor built on Apple's Hypervisor.framework with Metal GPU passthrough. ~4400 lines of Swift, no external dependencies — only Apple system frameworks (Hypervisor, Metal, AppKit, QuartzCore).
+This is a native macOS ARM64 hypervisor built on Apple's Hypervisor.framework with Metal GPU passthrough. ~6000 lines of Swift, no external dependencies — only Apple system frameworks (Hypervisor, Metal, AppKit, QuartzCore).
 
 ### Threading Model
 
