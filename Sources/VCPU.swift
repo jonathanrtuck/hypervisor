@@ -44,6 +44,8 @@ final class VCPU {
     private var timerMaskedByUs = false
     /// CNTV_CVAL at the time we masked IMASK — used to detect guest timer re-arm.
     private var timerMaskedCval: UInt64 = 0
+    /// Suppresses repeated "unsupported granule" warnings in translateGuestVA.
+    private var loggedGranuleWarning = false
 
     init(vm: VirtualMachine, index: Int, entryPoint: UInt64, dtbAddress: UInt64) throws {
         self.vm = vm
@@ -410,16 +412,20 @@ final class VCPU {
             }
         } else if pa >= GIC_DIST_BASE && pa < GIC_DIST_BASE + 0x10000 {
             // GIC distributor — should be handled by hv_gic. If we reach here,
-            // hv_gic didn't handle this register. Always log — returning 0
-            // could mask GIC initialization failures.
-            let rw = isWrite ? "W" : "R"
-            print("vCPU[\(index)]: GIC DIST fallback \(rw) offset=0x\(String(pa - GIC_DIST_BASE, radix: 16)) at PC=0x\(String(pc, radix: 16))")
+            // GIC registers not handled by hv_gic (e.g., IPRIORITYR).
+            // Verbose-only — kernels write hundreds of these during init.
+            if vm.verbose {
+                let rw = isWrite ? "W" : "R"
+                print("vCPU[\(index)]: GIC DIST fallback \(rw) offset=0x\(String(pa - GIC_DIST_BASE, radix: 16)) at PC=0x\(String(pc, radix: 16))")
+            }
             if !isWrite {
                 try writeGPR(reg, 0)
             }
         } else if pa >= GIC_REDIST_BASE && pa < GIC_REDIST_BASE + 0x100000 {
-            let rw = isWrite ? "W" : "R"
-            print("vCPU[\(index)]: GIC REDIST fallback \(rw) offset=0x\(String(pa - GIC_REDIST_BASE, radix: 16)) at PC=0x\(String(pc, radix: 16))")
+            if vm.verbose {
+                let rw = isWrite ? "W" : "R"
+                print("vCPU[\(index)]: GIC REDIST fallback \(rw) offset=0x\(String(pa - GIC_REDIST_BASE, radix: 16)) at PC=0x\(String(pc, radix: 16))")
+            }
             if !isWrite {
                 try writeGPR(reg, 0)
             }
@@ -482,9 +488,11 @@ final class VCPU {
         }
 
         if !granuleOK {
-            print("vCPU[\(index)]: VA translation: unsupported granule in TCR " +
-                  "0x\(String(tcr, radix: 16)), falling back to VA==PA " +
-                  "for 0x\(String(va, radix: 16))")
+            if !loggedGranuleWarning {
+                print("vCPU[\(index)]: VA translation: unsupported granule in TCR " +
+                      "0x\(String(tcr, radix: 16)), falling back to VA==PA")
+                loggedGranuleWarning = true
+            }
             return va
         }
 
