@@ -454,14 +454,13 @@ final class VCPU {
     // MARK: - ISV=0 instruction decoding
 
     /// Translate a guest virtual address to physical address by walking the
-    /// guest's stage-1 page tables (TTBR0/TTBR1 → 4-level descriptor walk).
+    /// guest's stage-1 page tables (TTBR0/TTBR1 → multi-level descriptor walk).
     ///
     /// Returns the VA unchanged when the MMU is disabled (SCTLR_EL1.M = 0).
     /// Returns nil if the walk encounters an invalid descriptor.
     ///
-    /// Only supports 4KB granule — the standard on Apple Silicon for both
-    /// macOS and Linux guests. Logs a warning and falls back to VA == PA
-    /// for unsupported granule sizes.
+    /// Supports 4KB (TG=12), 16KB (TG=14), and 64KB (TG=16) granules.
+    /// The walk is parameterized by page bits and bits-per-level (page bits - 3).
     private func translateGuestVA(_ va: UInt64) throws -> UInt64? {
         let sctlr = try getSysReg(HV_SYS_REG_SCTLR_EL1)
 
@@ -475,41 +474,64 @@ final class VCPU {
 
         let ttbr: UInt64
         let tsz: Int
-        let granuleOK: Bool
+        let pageBits: Int
 
         if isKernelVA {
             ttbr = try getSysReg(HV_SYS_REG_TTBR1_EL1)
             tsz = Int((tcr >> 16) & 0x3F)  // T1SZ
-            granuleOK = ((tcr >> 30) & 0x3) == 0b10  // TG1: 10 = 4KB
+            switch (tcr >> 30) & 0x3 {      // TG1
+            case 0b01: pageBits = 14  // 16KB
+            case 0b10: pageBits = 12  // 4KB
+            case 0b11: pageBits = 16  // 64KB
+            default:
+                if !loggedGranuleWarning {
+                    print("vCPU[\(index)]: VA translation: reserved TG1 in TCR " +
+                          "0x\(String(tcr, radix: 16)), falling back to VA==PA")
+                    loggedGranuleWarning = true
+                }
+                return va
+            }
         } else {
             ttbr = try getSysReg(HV_SYS_REG_TTBR0_EL1)
             tsz = Int(tcr & 0x3F)  // T0SZ
-            granuleOK = ((tcr >> 14) & 0x3) == 0b00  // TG0: 00 = 4KB
-        }
-
-        if !granuleOK {
-            if !loggedGranuleWarning {
-                print("vCPU[\(index)]: VA translation: unsupported granule in TCR " +
-                      "0x\(String(tcr, radix: 16)), falling back to VA==PA")
-                loggedGranuleWarning = true
+            switch (tcr >> 14) & 0x3 {      // TG0
+            case 0b00: pageBits = 12  // 4KB
+            case 0b01: pageBits = 16  // 64KB
+            case 0b10: pageBits = 14  // 16KB
+            default:
+                if !loggedGranuleWarning {
+                    print("vCPU[\(index)]: VA translation: reserved TG0 in TCR " +
+                          "0x\(String(tcr, radix: 16)), falling back to VA==PA")
+                    loggedGranuleWarning = true
+                }
+                return va
             }
-            return va
         }
 
+        // Bits resolved per level = log2(page_size / 8) = pageBits - 3.
+        // 4KB → 9, 16KB → 11, 64KB → 13.
+        let bitsPerLevel = pageBits - 3
         let vaBits = 64 - tsz
-        // Start level depends on VA width. Each level resolves 9 bits.
-        // 4KB: L0 covers [47:39], L1 [38:30], L2 [29:21], L3 [20:12].
-        let startLevel: Int
-        if vaBits <= 30 { startLevel = 3 }
-        else if vaBits <= 39 { startLevel = 2 }
-        else { startLevel = 1 }
 
-        // Table base from TTBR (bits [47:12], ignoring ASID and CnP).
-        var tablePA = ttbr & 0x0000_FFFF_FFFF_F000
+        // Start level: highest level where pageBits + (3-L)*bitsPerLevel < vaBits.
+        let startLevel: Int
+        if vaBits <= pageBits + bitsPerLevel { startLevel = 3 }
+        else if vaBits <= pageBits + 2 * bitsPerLevel { startLevel = 2 }
+        else if vaBits <= pageBits + 3 * bitsPerLevel { startLevel = 1 }
+        else { startLevel = 0 }
+
+        // OA mask: bits [47:pageBits] — used for table, block, and page addresses.
+        let oaMask = UInt64(0x0000_FFFF_FFFF_FFFF) & ~((UInt64(1) << pageBits) - 1)
+        var tablePA = ttbr & oaMask
 
         for level in startLevel...3 {
-            let shift = 12 + (3 - level) * 9  // 39, 30, 21, 12
-            let index = Int((va >> shift) & 0x1FF)
+            let shift = pageBits + (3 - level) * bitsPerLevel
+
+            // At the start level the index may use fewer than bitsPerLevel bits
+            // (e.g., 64KB L1 with 48-bit VA uses only 6 bits).
+            let indexBits = min(bitsPerLevel, vaBits - shift)
+            let indexMask = (UInt64(1) << indexBits) - 1
+            let index = Int((va >> shift) & indexMask)
             let pteAddr = tablePA &+ UInt64(index * 8)
 
             guard let ptePtr = vm.guestToHost(pteAddr) else { return nil }
@@ -521,17 +543,18 @@ final class VCPU {
             if level < 3 && (pte & 2 == 0) {
                 // Block descriptor — OA from PTE, low bits from VA.
                 let blockMask = (UInt64(1) << shift) - 1
-                return (pte & 0x0000_FFFF_FFFF_F000 & ~blockMask) | (va & blockMask)
+                return (pte & oaMask & ~blockMask) | (va & blockMask)
             }
 
             if level == 3 {
                 // Page descriptor at L3 — bit[1] must be 1.
                 guard pte & 2 == 2 else { return nil }
-                return (pte & 0x0000_FFFF_FFFF_F000) | (va & 0xFFF)
+                let pageMask = (UInt64(1) << pageBits) - 1
+                return (pte & oaMask) | (va & pageMask)
             }
 
             // Table descriptor — descend to next level.
-            tablePA = pte & 0x0000_FFFF_FFFF_F000
+            tablePA = pte & oaMask
         }
 
         return nil
