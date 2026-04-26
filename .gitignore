@@ -1,12 +1,7 @@
-# Swift
 .build/
+.DS_Store
 .swiftpm/
 *.xcodeproj/
 DerivedData/
-xcuserdata/
-
-# Rust
 target/
-
-# macOS
-.DS_Store
+xcuserdata/

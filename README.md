@@ -1,12 +1,17 @@
 # hypervisor
 
-A native macOS hypervisor for ARM64 bare-metal development, with Metal GPU passthrough.
+A native macOS hypervisor for ARM64 bare-metal development, with Metal GPU
+passthrough.
 
-Built on Apple’s [Hypervisor.framework](https://developer.apple.com/documentation/hypervisor), this tool boots an ARM64 ELF kernel on Apple Silicon with hardware-accelerated GPU rendering — no emulation layers, no translation.
+Built on Apple’s
+[Hypervisor.framework](https://developer.apple.com/documentation/hypervisor),
+this tool boots an ARM64 ELF kernel on Apple Silicon with hardware-accelerated
+GPU rendering — no emulation layers, no translation.
 
 ## why this exists
 
-If you’re developing a bare-metal OS or kernel on a Mac, your options for GPU-accelerated display are limited:
+If you’re developing a bare-metal OS or kernel on a Mac, your options for
+GPU-accelerated display are limited:
 
 | Approach            | GPU Path                                 | Layers                   |
 | ------------------- | ---------------------------------------- | ------------------------ |
@@ -14,24 +19,46 @@ If you’re developing a bare-metal OS or kernel on a Mac, your options for GPU-
 | QEMU + virgl        | virglrenderer → ANGLE → MoltenVK → Metal | 4 translation layers     |
 | **This hypervisor** | **Native Metal**                         | **0 translation layers** |
 
-Your guest kernel sends Metal commands over a virtio device. The hypervisor replays them directly via the Metal API. No OpenGL. No Vulkan. No translation. The same GPU API on both sides.
+Your guest kernel sends Metal commands over a virtio device. The hypervisor
+replays them directly via the Metal API. No OpenGL. No Vulkan. No translation.
+The same GPU API on both sides.
 
 ## features
 
-- **Metal GPU passthrough** — guest sends serialized Metal commands, host replays them natively
+- **Metal GPU passthrough** — guest sends serialized Metal commands, host
+  replays them natively
 - **4x MSAA** — native Metal multisampling, no post-process AA
-- **Multi-core SMP** — hardware-backed vCPUs via Hypervisor.framework with PSCI CPU_ON
+- **Multi-core SMP** — hardware-backed vCPUs via Hypervisor.framework with PSCI
+  CPU_ON
 - **Hardware GIC** — Apple Silicons native GICv3, not software emulation
-- **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock forwarding), tablet (absolute pointer), Metal GPU
-- **Crash reporting** — automatic crash report on kernel panic via [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device. Captures vCPU registers, system registers, and full serial log to `/tmp/hypervisor-crash-<timestamp>.log`
-- **Built-in screenshot** — `--capture N path.png` captures the first `presentAndCommit` whose guest-assigned `frame_id` matches N. `SIGUSR1` for ad-hoc captures. Captures always include the cursor plane composite for accurate visual testing
-- **Background mode** — `--background` renders to an offscreen Metal texture with no window, no CAMetalLayer, and no interaction with the macOS window server. Zero focus disruption. Designed for CI pipelines and automated captures
-- **Event scripts** — `--events file.events` for automated input injection (keyboard, mouse, captures) using evdev key names. Combine with `--background` for headless operation
-- **Fixed resolution** — `--resolution WxH` for deterministic display dimensions in testing
-- **Watchdog timeout** — `--timeout SECS` exits with code 2 if the VM doesn't finish in time. Prevents infinite hangs when a kernel deadlocks before producing frames
-- **Block device** — `--drive path.img` attaches a raw disk image as a virtio-blk device
-- **ELF loader** — loads standard ELF64 binaries, handles VA→PA entry point resolution
-- **Device tree** — generates FDT with memory, UART, GIC, PSCI, CPU, and virtio nodes
+- **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock
+  forwarding), tablet (absolute pointer), Metal GPU
+- **Crash reporting** — automatic crash report on kernel panic via
+  [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device.
+  Captures vCPU registers, system registers, and full serial log to
+  `/tmp/hypervisor-crash-<timestamp>.log`
+- **Built-in screenshot** — `--capture N path.png` captures the first
+  `presentAndCommit` whose guest-assigned `frame_id` matches N. `SIGUSR1` for
+  ad-hoc captures. Captures always include the cursor plane composite for
+  accurate visual testing
+- **Background mode** — `--background` renders to an offscreen Metal texture
+  with no window, no CAMetalLayer, and no interaction with the macOS window
+  server. Zero focus disruption. Designed for CI pipelines and automated
+  captures
+- **Event scripts** — `--events file.events` for automated input injection
+  (keyboard, mouse, captures) using evdev key names. Combine with `--background`
+  for headless operation
+- **Fixed resolution** — `--resolution WxH` for deterministic display dimensions
+  in testing
+- **Watchdog timeout** — `--timeout SECS` exits with code 2 if the VM doesn't
+  finish in time. Prevents infinite hangs when a kernel deadlocks before
+  producing frames
+- **Block device** — `--drive path.img` attaches a raw disk image as a
+  virtio-blk device
+- **ELF loader** — loads standard ELF64 binaries, handles VA→PA entry point
+  resolution
+- **Device tree** — generates FDT with memory, UART, GIC, PSCI, CPU, and virtio
+  nodes
 
 ## requirements
 
@@ -54,11 +81,13 @@ make build && make sign
 make run KERNEL=path/to/kernel.elf
 ```
 
-The `com.apple.security.hypervisor` entitlement is applied automatically by `make sign`.
+The `com.apple.security.hypervisor` entitlement is applied automatically by
+`make sign`.
 
 ### Hello Triangle Demo
 
-A self-contained bare-metal Rust example that renders a colored triangle with 4x MSAA:
+A self-contained bare-metal Rust example that renders a colored triangle with 4x
+MSAA:
 
 ```sh
 cd examples/hello-triangle
@@ -68,9 +97,12 @@ make sign
 .build/debug/hypervisor examples/hello-triangle/target/aarch64-unknown-none/release/hello-triangle --windowed
 ```
 
-The example reads display dimensions from the virtio-metal config space, so it renders at native resolution in both windowed and fullscreen modes.
+The example reads display dimensions from the virtio-metal config space, so it
+renders at native resolution in both windowed and fullscreen modes.
 
-The example is ~700 lines with zero dependencies — boots, initializes virtio, compiles MSL shaders, and draws a triangle via the Metal protocol. Read the source for a walkthrough of how to build a guest driver.
+The example is ~700 lines with zero dependencies — boots, initializes virtio,
+compiles MSL shaders, and draws a triangle via the Metal protocol. Read the
+source for a walkthrough of how to build a guest driver.
 
 ## usage
 
@@ -147,7 +179,9 @@ SCRIPT
 
 ### Event Script Format
 
-Each line specifies a frame_id and a command. Frame_ids correspond to the guest's `presentAndCommit` frame_id values. Uses standard Linux evdev key names (`linux/input-event-codes.h`). `#` comments, blank lines ignored.
+Each line specifies a frame_id and a command. Frame_ids correspond to the
+guest's `presentAndCommit` frame_id values. Uses standard Linux evdev key names
+(`linux/input-event-codes.h`). `#` comments, blank lines ignored.
 
 ```text
 0 text hello world           # Inject Unicode text at frame 0 (1 frame)
@@ -163,13 +197,17 @@ Each line specifies a frame_id and a command. Frame_ids correspond to the guest'
 55 exit                      # Exit the hypervisor cleanly
 ```
 
-Multi-frame commands expand across consecutive frame_ids starting from the specified one:
+Multi-frame commands expand across consecutive frame_ids starting from the
+specified one:
 
-- `text` — always 1 frame (all codepoints injected as EV_TEXT events at the specified frame_id)
+- `text` — always 1 frame (all codepoints injected as EV_TEXT events at the
+  specified frame_id)
 - `dblclick` — 2 frames (click at N, click at N+1)
-- `drag` — steps+2 frames (press + interpolation + release; default 10 steps = 12 frames; optional 5th arg overrides)
+- `drag` — steps+2 frames (press + interpolation + release; default 10 steps =
+  12 frames; optional 5th arg overrides)
 
-If two commands overlap on the same frame_id, both fire. Avoid scheduling other actions within a multi-frame command's range.
+If two commands overlap on the same frame_id, both fire. Avoid scheduling other
+actions within a multi-frame command's range.
 
 ## architecture
 
@@ -253,7 +291,9 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 
 ## virtio device architecture
 
-Each virtio backend maps one virtio device to one Apple framework. The guest always sees standard virtio; the host always sees native macOS APIs. No translation layers in between.
+Each virtio backend maps one virtio device to one Apple framework. The guest
+always sees standard virtio; the host always sees native macOS APIs. No
+translation layers in between.
 
 | Backend       | Virtio Device    | Apple Framework | Guest Sees           | Host Uses                 |
 | ------------- | ---------------- | --------------- | -------------------- | ------------------------- |
@@ -263,26 +303,46 @@ Each virtio backend maps one virtio device to one Apple framework. The guest alw
 | `VirtioMetal` | GPU (device 22)  | Metal           | Metal command stream | MTLDevice/MTLCommandQueue |
 | `VirtioBlock` | Block (device 2) | Foundation (FS) | virtio-blk protocol  | File-backed read/write    |
 
-This pattern is the organizing principle for all backends, current and future. Adding a new backend means: pick a virtio device type (standard or custom), write a Swift class that translates between virtio virtqueues and the corresponding Apple framework, register it at a slot in `main.swift`.
+This pattern is the organizing principle for all backends, current and future.
+Adding a new backend means: pick a virtio device type (standard or custom),
+write a Swift class that translates between virtio virtqueues and the
+corresponding Apple framework, register it at a slot in `main.swift`.
 
 ### Planned Backends
 
 These are not yet implemented. Slot assignments and details may change.
 
-**virtio-sound** (device ID 25) — Audio playback and capture via CoreAudio. Two virtqueues: TX for playback, RX for capture. The guest negotiates PCM stream parameters (sample rate, channels, format) via virtio-sound’s standard config space. The host backend creates a CoreAudio audio unit and bridges PCM buffers. Needed for audio/video content types.
+**virtio-sound** (device ID 25) — Audio playback and capture via CoreAudio. Two
+virtqueues: TX for playback, RX for capture. The guest negotiates PCM stream
+parameters (sample rate, channels, format) via virtio-sound’s standard config
+space. The host backend creates a CoreAudio audio unit and bridges PCM buffers.
+Needed for audio/video content types.
 
 **Networking** — Options include:
 
-- _virtio-net_ (device ID 1): Standard NIC. The guest needs a TCP/IP stack. The host bridges via `Network.framework` (userspace packet injection) or a `utun` device.
-- _HTTP bridge_ (custom device): A higher-level alternative that exposes HTTP request/response and WebSocket semantics directly over virtio. The guest sends structured HTTP requests; the host executes them via `URLSession`. Avoids the guest needing a full TCP/IP stack at the cost of not supporting arbitrary protocols.
+- _virtio-net_ (device ID 1): Standard NIC. The guest needs a TCP/IP stack. The
+  host bridges via `Network.framework` (userspace packet injection) or a `utun`
+  device.
+- _HTTP bridge_ (custom device): A higher-level alternative that exposes HTTP
+  request/response and WebSocket semantics directly over virtio. The guest sends
+  structured HTTP requests; the host executes them via `URLSession`. Avoids the
+  guest needing a full TCP/IP stack at the cost of not supporting arbitrary
+  protocols.
 
-**Clipboard bridge** — Copy/paste between host and guest. Either a custom virtio device or an extension of virtio-input. The host side reads and writes `NSPasteboard`. The guest side exposes a simple get/put interface for the OS clipboard abstraction.
+**Clipboard bridge** — Copy/paste between host and guest. Either a custom virtio
+device or an extension of virtio-input. The host side reads and writes
+`NSPasteboard`. The guest side exposes a simple get/put interface for the OS
+clipboard abstraction.
 
-**File drag-drop** — Drag files between host Finder and guest window. Could extend virtio-9p (the file is already accessible via the shared directory) or use a custom device that sends file metadata + path on drop events. The host side hooks `NSDraggingDestination` / `NSDraggingSource` on the AppKit window.
+**File drag-drop** — Drag files between host Finder and guest window. Could
+extend virtio-9p (the file is already accessible via the shared directory) or
+use a custom device that sends file metadata + path on drop events. The host
+side hooks `NSDraggingDestination` / `NSDraggingSource` on the AppKit window.
 
 ## metal GPU protocol
 
-The Metal passthrough protocol is a simple command stream over two virtqueues. See [`PROTOCOL.md`](PROTOCOL.md) for the full specification.
+The Metal passthrough protocol is a simple command stream over two virtqueues.
+See [`PROTOCOL.md`](PROTOCOL.md) for the full specification.
 
 ### Quick Overview
 
@@ -292,19 +352,25 @@ Your guest driver writes a sequence of commands into a virtio buffer:
 [u16 method_id] [u16 flags] [u32 payload_size] [payload bytes...]
 ```
 
-- **Queue 0 (setup):** Object creation — compile shaders, create pipelines, create textures
-- **Queue 1 (render):** Per-frame rendering — begin pass, set state, draw, present
+- **Queue 0 (setup):** Object creation — compile shaders, create pipelines,
+  create textures
+- **Queue 1 (render):** Per-frame rendering — begin pass, set state, draw,
+  present
 
-The host deserializes each command and calls the corresponding Metal API. Guest-assigned `u32` handle IDs map to real Metal objects on the host.
+The host deserializes each command and calls the corresponding Metal API.
+Guest-assigned `u32` handle IDs map to real Metal objects on the host.
 
 ### Building a Guest Driver
 
 To use Metal GPU passthrough, your guest kernel needs:
 
-1. **A virtio MMIO driver** — initialize the transport at slot 3 (PA `0x0A000200 * 3`)
+1. **A virtio MMIO driver** — initialize the transport at slot 3 (PA
+   `0x0A000200 * 3`)
 2. **Metal protocol encoder** — serialize commands into the wire format
-3. **MSL shaders** — write Metal Shading Language source (compiled at runtime by the host)
-4. **Vertex data** — the default vertex layout is `float2 position + float2 texCoord + float4 color` (32 bytes)
+3. **MSL shaders** — write Metal Shading Language source (compiled at runtime by
+   the host)
+4. **Vertex data** — the default vertex layout is
+   `float2 position + float2 texCoord + float4 color` (32 bytes)
 
 A minimal rendering loop:
 

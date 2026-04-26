@@ -25,8 +25,14 @@ enum DTB {
         let deviceId: UInt32
     }
 
+    /// Module loaded into guest RAM (flat binary, entry at offset 0).
+    struct ModuleInfo {
+        let start: UInt64  // Physical address (inclusive)
+        let end: UInt64    // Physical address (exclusive)
+    }
+
     /// Generate a DTB with memory, GIC, timer, UART, PSCI, CPUs, and virtio devices.
-    static func minimal(ramBase: UInt64, ramSize: Int, cpuCount: Int = 4, virtioDevices: [DeviceInfo] = []) -> Data {
+    static func minimal(ramBase: UInt64, ramSize: Int, cpuCount: Int = 4, virtioDevices: [DeviceInfo] = [], module: ModuleInfo? = nil) -> Data {
         var b = FDTBuilder()
 
         let gicPhandle: UInt32 = 1
@@ -87,9 +93,13 @@ enum DTB {
         b.prop_reg(0x0902_0000, 0x2)
         b.endNode()
 
-        // Chosen node (tells kernel where stdout is)
+        // Chosen node (tells kernel where stdout is, plus optional module location)
         b.beginNode("chosen")
         b.prop_string("stdout-path", "/pl011@9000000")
+        if let mod = module {
+            b.prop_u64("module-start", mod.start)
+            b.prop_u64("module-end", mod.end)
+        }
         b.endNode()
 
         // psci node (for CPU_ON)
@@ -153,6 +163,14 @@ private struct FDTBuilder {
         appendU32(4)            // len
         appendU32(nameOff)      // nameoff
         appendU32(value)        // value
+    }
+
+    mutating func prop_u64(_ name: String, _ value: UInt64) {
+        let nameOff = addString(name)
+        appendU32(0x0000_0003)  // FDT_PROP
+        appendU32(8)            // len
+        appendU32(nameOff)      // nameoff
+        appendU64(value)        // value
     }
 
     mutating func prop_string(_ name: String, _ value: String) {

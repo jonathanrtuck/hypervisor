@@ -1,17 +1,27 @@
 # Metal-over-Virtio Protocol Specification
 
-This document specifies the wire format for Metal GPU command passthrough between an ARM64 guest and the macOS host hypervisor. It is the source of truth for guest driver implementors.
+This document specifies the wire format for Metal GPU command passthrough
+between an ARM64 guest and the macOS host hypervisor. It is the source of truth
+for guest driver implementors.
 
 ## Overview
 
-The protocol enables a guest kernel to issue Metal rendering commands without any translation layers. The guest serializes Metal API calls into a flat command buffer, sends it over a virtio device, and the host deserializes and replays each command via the native Metal API.
+The protocol enables a guest kernel to issue Metal rendering commands without
+any translation layers. The guest serializes Metal API calls into a flat command
+buffer, sends it over a virtio device, and the host deserializes and replays
+each command via the native Metal API.
 
 ### Design Principles
 
-- **Thin proxy.** Commands map 1:1 to Metal API calls. No abstraction, no batching, no reinterpretation.
-- **Guest-assigned handles.** The guest pre-assigns `u32` IDs for all Metal objects. The host maintains a mapping to real Metal objects. Invalid handles are silently ignored.
-- **Two queues.** Setup commands (object creation) and render commands (per-frame) use separate virtqueues to allow independent flow control.
-- **Flat encoding.** No nested structures, no variable-length arrays within fixed fields. Every command can be parsed with sequential reads.
+- **Thin proxy.** Commands map 1:1 to Metal API calls. No abstraction, no
+  batching, no reinterpretation.
+- **Guest-assigned handles.** The guest pre-assigns `u32` IDs for all Metal
+  objects. The host maintains a mapping to real Metal objects. Invalid handles
+  are silently ignored.
+- **Two queues.** Setup commands (object creation) and render commands
+  (per-frame) use separate virtqueues to allow independent flow control.
+- **Flat encoding.** No nested structures, no variable-length arrays within
+  fixed fields. Every command can be parsed with sequential reads.
 
 ## Transport
 
@@ -22,7 +32,9 @@ The Metal GPU device uses virtio MMIO with **device ID 22** (custom).
 | Setup  | 0     | Object creation/destruction | Once at init, occasional texture uploads |
 | Render | 1     | Per-frame command buffers   | Every frame                              |
 
-The guest writes one or more commands into a virtio descriptor chain. The host processes all commands in the chain sequentially, then marks the descriptor as used.
+The guest writes one or more commands into a virtio descriptor chain. The host
+processes all commands in the chain sequentially, then marks the descriptor as
+used.
 
 ## Command Format
 
@@ -35,7 +47,8 @@ Offset  Size  Field
 4       u32   payload_size   Size of payload in bytes (following this header)
 ```
 
-Commands are packed sequentially in the virtio buffer with no padding between them.
+Commands are packed sequentially in the virtio buffer with no padding between
+them.
 
 ## Special Handles
 
@@ -56,7 +69,8 @@ Payload:
   u8[]  source             UTF-8 MSL source code
 ```
 
-The host calls `MTLDevice.makeLibrary(source:)`. Compilation errors are logged but do not halt the guest — subsequent use of the handle is a no-op.
+The host calls `MTLDevice.makeLibrary(source:)`. Compilation errors are logged
+but do not halt the guest — subsequent use of the handle is a no-op.
 
 ### `GET_FUNCTION` (0x0002)
 
@@ -96,7 +110,8 @@ Payload (17 bytes):
 
 Stride: **32 bytes**, buffer index 0.
 
-This layout is used for all render pipelines. Guest shaders must match this vertex input layout.
+This layout is used for all render pipelines. Guest shaders must match this
+vertex input layout.
 
 ### `CREATE_COMPUTE_PIPELINE` (0x0011)
 
@@ -175,7 +190,8 @@ Payload:
   u32   handle             Handle of the object to destroy
 ```
 
-The host removes the handle from all object tables (libraries, functions, pipelines, textures, etc.).
+The host removes the handle from all object tables (libraries, functions,
+pipelines, textures, etc.).
 
 ## Render Commands (Queue 1)
 
@@ -403,17 +419,33 @@ Payload:
   u32   frame_id       Guest-assigned frame identifier
 ```
 
-The `frame_id` is an opaque value assigned by the guest. The host uses it for `--capture` matching and event script timing — `--capture N` captures the first present whose `frame_id` equals N. Guests that don't need deterministic frame identification can send 0 for every present. Guests that need deterministic captures (e.g., for visual regression testing) should assign sequential IDs starting from 0.
+The `frame_id` is an opaque value assigned by the guest. The host uses it for
+`--capture` matching and event script timing — `--capture N` captures the first
+present whose `frame_id` equals N. Guests that don't need deterministic frame
+identification can send 0 for every present. Guests that need deterministic
+captures (e.g., for visual regression testing) should assign sequential IDs
+starting from 0.
 
-The host presents the CAMetalLayer drawable (if one was acquired via `DRAWABLE_HANDLE`) and commits the Metal command buffer. The guest should wait for the virtio completion before submitting the next frame.
+The host presents the CAMetalLayer drawable (if one was acquired via
+`DRAWABLE_HANDLE`) and commits the Metal command buffer. The guest should wait
+for the virtio completion before submitting the next frame.
 
-If the cursor plane is active (visible, with a cursor image set), the host composites the cursor onto the drawable in a separate render pass immediately before presenting. This cursor plane is independent of the guest's scene graph — the guest does not need to render the cursor itself.
+If the cursor plane is active (visible, with a cursor image set), the host
+composites the cursor onto the drawable in a separate render pass immediately
+before presenting. This cursor plane is independent of the guest's scene graph —
+the guest does not need to render the cursor itself.
 
 ### Cursor Plane
 
-The cursor plane provides hardware-cursor-like compositing. The host maintains a small BGRA texture (the cursor image) and composites it onto the drawable at the current position before each `PRESENT_AND_COMMIT`. This decouples cursor rendering from the guest's scene graph and render pipeline, eliminating cursor lag.
+The cursor plane provides hardware-cursor-like compositing. The host maintains a
+small BGRA texture (the cursor image) and composites it onto the drawable at the
+current position before each `PRESENT_AND_COMMIT`. This decouples cursor
+rendering from the guest's scene graph and render pipeline, eliminating cursor
+lag.
 
-The guest sends the cursor image once (or on shape change), updates the position each frame, and controls visibility. The host handles compositing — the guest never draws the cursor into its framebuffer.
+The guest sends the cursor image once (or on shape change), updates the position
+each frame, and controls visibility. The host handles compositing — the guest
+never draws the cursor into its framebuffer.
 
 #### `SET_CURSOR_IMAGE` (0x0F10)
 
@@ -428,9 +460,13 @@ Payload:
   u8[]  bgra_pixels    BGRA pixel data (premultiplied alpha), width * height * 4 bytes
 ```
 
-The cursor image is composited with premultiplied alpha blending (src=one, dst=oneMinusSourceAlpha). The hotspot defines the click point within the image — the host offsets the draw position so the hotspot aligns with the cursor position.
+The cursor image is composited with premultiplied alpha blending (src=one,
+dst=oneMinusSourceAlpha). The hotspot defines the click point within the image —
+the host offsets the draw position so the hotspot aligns with the cursor
+position.
 
-Pixel format is BGRA with sRGB encoding (the host creates the texture as `bgra8Unorm_srgb` for gamma-correct compositing).
+Pixel format is BGRA with sRGB encoding (the host creates the texture as
+`bgra8Unorm_srgb` for gamma-correct compositing).
 
 #### `SET_CURSOR_POSITION` (0x0F11)
 
@@ -442,7 +478,9 @@ Payload:
   f32   y              Cursor Y in framebuffer pixels (the click point)
 ```
 
-The position is the logical cursor location (where a click would land). The host subtracts the hotspot offset to compute the image draw position. Uses `f32` for subpixel precision.
+The position is the logical cursor location (where a click would land). The host
+subtracts the hotspot offset to compute the image draw position. Uses `f32` for
+subpixel precision.
 
 #### `SET_CURSOR_VISIBLE` (0x0F12)
 
@@ -453,7 +491,8 @@ Payload:
   u8    visible        1 = show, 0 = hide
 ```
 
-When hidden, the cursor plane is not composited. The guest should hide the cursor on keyboard input and show it on mouse movement.
+When hidden, the cursor plane is not composited. The guest should hide the
+cursor on keyboard input and show it on mouse movement.
 
 #### `SET_CURSOR_FROM_TEXTURE` (0x0F13)
 
@@ -468,13 +507,23 @@ Payload:
   i16   hotspot_y         Hotspot Y offset in image pixels
 ```
 
-Like `SET_CURSOR_IMAGE`, but the host reads cursor pixels directly from the named GPU texture instead of receiving pixel data inline. The host encodes a blit on the current command buffer; the actual pixel readback is deferred to after the next `PRESENT_AND_COMMIT` completes (when GPU work is guaranteed finished).
+Like `SET_CURSOR_IMAGE`, but the host reads cursor pixels directly from the
+named GPU texture instead of receiving pixel data inline. The host encodes a
+blit on the current command buffer; the actual pixel readback is deferred to
+after the next `PRESENT_AND_COMMIT` completes (when GPU work is guaranteed
+finished).
 
-This is the preferred path when the guest renders the cursor to a GPU texture (e.g., via stencil-then-cover path rendering). It avoids a GPU→CPU→GPU round trip — the guest never reads the pixels back.
+This is the preferred path when the guest renders the cursor to a GPU texture
+(e.g., via stencil-then-cover path rendering). It avoids a GPU→CPU→GPU round
+trip — the guest never reads the pixels back.
 
 ### Cursor Plane and Captures
 
-When `--capture` or `SIGUSR1` triggers a screenshot, the host always composites the cursor onto the captured image, regardless of whether the live display uses GPU compositing or an `NSCursor` overlay. This ensures captures accurately reflect the cursor state for automated visual testing. The compositing is done on a staging copy — the live display is unaffected.
+When `--capture` or `SIGUSR1` triggers a screenshot, the host always composites
+the cursor onto the captured image, regardless of whether the live display uses
+GPU compositing or an `NSCursor` overlay. This ensures captures accurately
+reflect the cursor state for automated visual testing. The compositing is done
+on a staging copy — the live display is unaffected.
 
 ## Enumerations
 

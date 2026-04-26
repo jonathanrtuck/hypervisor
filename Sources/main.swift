@@ -32,6 +32,7 @@ struct Config {
     let cpuCount: Int
     let shareDir: String?
     let drivePath: String?
+    let modulePath: String?
     let captureFrames: Set<Int>
     let capturePath: String
     let eventsFile: String?
@@ -57,6 +58,7 @@ func printUsage() {
     print("  --cpus N             Number of vCPUs (default: 4)")
     print("  --share DIR          9P shared directory (auto-detected if omitted)")
     print("  --drive PATH         Disk image for virtio-blk (raw format)")
+    print("  --module PATH        Flat binary to load into guest RAM (entry at offset 0)")
     print("  --capture N PATH     Capture frame_id N as PNG to PATH, then exit")
     print("  --capture N,M,.. PFX Capture multiple frame_ids as PFX-NNN.png")
     print("  --events FILE        Run event script (evdev input injection + captures)")
@@ -84,6 +86,7 @@ func parseArgs() -> Config {
     var cpuCount = 4
     var shareDir: String?
     var drivePath: String?
+    var modulePath: String?
     var captureFrames: Set<Int> = []
     var capturePath = "/tmp/hypervisor-capture.png"
     var eventsFile: String?
@@ -130,6 +133,13 @@ func parseArgs() -> Config {
                 exit(1)
             }
             drivePath = args[i + 1]
+            i += 1
+        case "--module":
+            guard i + 1 < args.count else {
+                print("Error: --module requires a file path")
+                exit(1)
+            }
+            modulePath = args[i + 1]
             i += 1
         case "--capture":
             guard i + 2 < args.count else {
@@ -217,6 +227,7 @@ func parseArgs() -> Config {
         cpuCount: cpuCount,
         shareDir: shareDir,
         drivePath: drivePath,
+        modulePath: modulePath,
         captureFrames: captureFrames,
         capturePath: capturePath,
         eventsFile: eventsFile,
@@ -435,6 +446,24 @@ func main() throws {
         // Scheduled captures and event scripts are driven by presents.
     }
 
+    // ── Module loading ────────────────────────────────────────────────
+
+    var moduleInfo: DTB.ModuleInfo?
+    if let modulePath = config.modulePath {
+        let moduleData = try Data(contentsOf: URL(fileURLWithPath: modulePath))
+        guard !moduleData.isEmpty else {
+            print("Error: module binary is empty: \(modulePath)")
+            exit(1)
+        }
+        let ramTop = config.ramBase + UInt64(config.ramSize)
+        let moduleSize = UInt64(moduleData.count)
+        let moduleStart = (ramTop - moduleSize) & ~0xFFF
+        vm.writeGuest(at: moduleStart, data: moduleData)
+        moduleInfo = DTB.ModuleInfo(start: moduleStart, end: moduleStart + moduleSize)
+        print("  Module: \(modulePath) (\(moduleData.count) bytes)")
+        print("    Loaded at 0x\(String(moduleStart, radix: 16))–0x\(String(moduleStart + moduleSize, radix: 16))")
+    }
+
     // ── DTB ─────────────────────────────────────────────────────────────
 
     var dtbDevices: [DTB.DeviceInfo] = []
@@ -443,7 +472,8 @@ func main() throws {
     }
 
     let dtb = DTB.minimal(ramBase: config.ramBase, ramSize: config.ramSize,
-                          cpuCount: config.cpuCount, virtioDevices: dtbDevices)
+                          cpuCount: config.cpuCount, virtioDevices: dtbDevices,
+                          module: moduleInfo)
     let dtbAddr = config.ramBase
     vm.writeGuest(at: dtbAddr, data: dtb)
     print("  DTB loaded at 0x\(String(dtbAddr, radix: 16)) (\(dtb.count) bytes)")
