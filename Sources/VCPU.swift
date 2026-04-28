@@ -31,6 +31,23 @@ let GIC_REDIST_BASE: UInt64 = 0x080A_0000
 let VIRTIO_BASE: UInt64   = 0x0A00_0000
 let VIRTIO_SIZE: UInt64   = 0x4000
 
+/// PMU register encodings (op0, op1, CRn, CRm, op2) per ARM DDI 0487
+let PMU_PMCR_EL0       = sysRegId(3, 3, 9, 12, 0)
+let PMU_PMCNTENSET_EL0 = sysRegId(3, 3, 9, 12, 1)
+let PMU_PMCNTENCLR_EL0 = sysRegId(3, 3, 9, 12, 2)
+let PMU_PMOVSCLR_EL0   = sysRegId(3, 3, 9, 12, 3)
+let PMU_PMSELR_EL0     = sysRegId(3, 3, 9, 12, 5)
+let PMU_PMCEID0_EL0    = sysRegId(3, 3, 9, 12, 6)
+let PMU_PMCEID1_EL0    = sysRegId(3, 3, 9, 12, 7)
+let PMU_PMCCNTR_EL0    = sysRegId(3, 3, 9, 13, 0)
+let PMU_PMXEVTYPER_EL0 = sysRegId(3, 3, 9, 13, 1)
+let PMU_PMXEVCNTR_EL0  = sysRegId(3, 3, 9, 13, 2)
+let PMU_PMUSERENR_EL0  = sysRegId(3, 3, 9, 14, 0)
+let PMU_PMOVSSET_EL0   = sysRegId(3, 3, 9, 14, 3)
+let PMU_PMINTENSET_EL1 = sysRegId(3, 0, 9, 14, 1)
+let PMU_PMINTENCLR_EL1 = sysRegId(3, 0, 9, 14, 2)
+let PMU_PMCCFILTR_EL0  = sysRegId(3, 3, 14, 15, 7)
+
 final class VCPU {
     let vm: VirtualMachine
     let index: Int
@@ -46,6 +63,16 @@ final class VCPU {
     private var timerMaskedCval: UInt64 = 0
     /// Suppresses repeated "unsupported granule" warnings in translateGuestVA.
     private var loggedGranuleWarning = false
+
+    // MARK: PMU emulation state
+    private var pmuControl: UInt64 = 0
+    private var pmuCounterEnable: UInt64 = 0
+    private var pmuUserEnable: UInt64 = 0
+    private var pmuOverflow: UInt64 = 0
+    private var pmuInterruptEnable: UInt64 = 0
+    private var pmccfiltr: UInt64 = 0
+    private var cycleCounterAccum: UInt64 = 0
+    private var cycleCounterBase: UInt64 = 0
 
     init(vm: VirtualMachine, index: Int, entryPoint: UInt64, dtbAddress: UInt64) throws {
         self.vm = vm
@@ -130,6 +157,14 @@ final class VCPU {
         var val: UInt64 = 0
         try hvCheck(hv_vcpu_get_sys_reg(vcpuId, reg, &val), "get_sys_reg")
         return val
+    }
+
+    private func getGPR(_ rt: Int) throws -> UInt64 {
+        rt != 31 ? try getReg(hv_reg_t(rawValue: UInt32(rt))) : 0
+    }
+
+    private func setGPR(_ rt: Int, _ value: UInt64) throws {
+        if rt != 31 { try setReg(hv_reg_t(rawValue: UInt32(rt)), value) }
     }
 
     // MARK: - Execution loop
@@ -820,38 +855,147 @@ final class VCPU {
         try setReg(HV_REG_PC, pc + 4)
     }
 
+    // MARK: - PMU emulation
+
+    private var pmuCycleCounterRunning: Bool {
+        (pmuControl & 1 != 0) && (pmuCounterEnable & (1 << 31) != 0)
+    }
+
+    private func readCycleCounter() -> UInt64 {
+        guard pmuCycleCounterRunning else { return cycleCounterAccum }
+        let elapsed = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- cycleCounterBase
+        return cycleCounterAccum &+ elapsed &* 3
+    }
+
+    /// Fold elapsed host time into the accumulator and reset the base.
+    /// Call before any state change that affects whether the counter is running.
+    private func syncCycleCounter() {
+        let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        if pmuCycleCounterRunning {
+            let elapsed = now &- cycleCounterBase
+            cycleCounterAccum &+= elapsed &* 3
+        }
+        cycleCounterBase = now
+    }
+
+    /// Returns true if the register was handled (caller must advance PC).
+    private func handlePMURegister(regId: UInt16, isRead: Bool, rt: Int) throws -> Bool {
+        switch regId {
+        case PMU_PMCCNTR_EL0:
+            if isRead {
+                try setGPR(rt, readCycleCounter())
+            } else {
+                syncCycleCounter()
+                cycleCounterAccum = try getGPR(rt)
+            }
+
+        case PMU_PMCR_EL0:
+            if isRead {
+                // IMP=0x41 (ARM), N=0 (no event counters), LC=1 (64-bit cycle counter)
+                try setGPR(rt, (0x41 << 24) | (1 << 6) | (pmuControl & 0x39))
+            } else {
+                let value = try getGPR(rt)
+                syncCycleCounter()
+                // LC (bit 6) not stored — hardwired to 1 (PMCCNTR is always 64-bit).
+                // D (bit 3) is stored but has no effect when LC=1 (DDI 0487 §D13.3.1).
+                pmuControl = value & 0x39
+                if value & (1 << 2) != 0 { cycleCounterAccum = 0 }
+            }
+
+        case PMU_PMCNTENSET_EL0:
+            if isRead {
+                try setGPR(rt, pmuCounterEnable)
+            } else {
+                syncCycleCounter()
+                pmuCounterEnable |= try getGPR(rt) & (1 << 31)
+            }
+
+        case PMU_PMCNTENCLR_EL0:
+            if isRead {
+                try setGPR(rt, pmuCounterEnable)
+            } else {
+                syncCycleCounter()
+                pmuCounterEnable &= ~(try getGPR(rt) & (1 << 31))
+            }
+
+        case PMU_PMUSERENR_EL0:
+            if isRead {
+                try setGPR(rt, pmuUserEnable)
+            } else {
+                pmuUserEnable = try getGPR(rt) & 0xF
+            }
+
+        case PMU_PMCCFILTR_EL0:
+            if isRead {
+                try setGPR(rt, pmccfiltr)
+            } else {
+                pmccfiltr = try getGPR(rt)
+            }
+
+        case PMU_PMCEID0_EL0, PMU_PMCEID1_EL0:
+            if isRead { try setGPR(rt, 0) }
+
+        case PMU_PMOVSSET_EL0:
+            if isRead {
+                try setGPR(rt, pmuOverflow)
+            } else {
+                pmuOverflow |= try getGPR(rt) & (1 << 31)
+            }
+
+        case PMU_PMOVSCLR_EL0:
+            if isRead {
+                try setGPR(rt, pmuOverflow)
+            } else {
+                pmuOverflow &= ~(try getGPR(rt) & (1 << 31))
+            }
+
+        case PMU_PMINTENSET_EL1:
+            if isRead {
+                try setGPR(rt, pmuInterruptEnable)
+            } else {
+                pmuInterruptEnable |= try getGPR(rt) & (1 << 31)
+            }
+
+        case PMU_PMINTENCLR_EL1:
+            if isRead {
+                try setGPR(rt, pmuInterruptEnable)
+            } else {
+                pmuInterruptEnable &= ~(try getGPR(rt) & (1 << 31))
+            }
+
+        case PMU_PMSELR_EL0, PMU_PMXEVTYPER_EL0, PMU_PMXEVCNTR_EL0:
+            if isRead { try setGPR(rt, 0) }
+
+        default:
+            return false
+        }
+        return true
+    }
+
     // MARK: - System register trap
 
     private func handleSysRegTrap(_ syndrome: UInt64) throws {
-        let isRead = (syndrome >> 0) & 1 == 1  // Direction: 1=read (MRS), 0=write (MSR)
+        let isRead = (syndrome >> 0) & 1 == 1
         let rt = Int((syndrome >> 5) & 0x1F)
-        let crm = (syndrome >> 1) & 0xF
-        let crn = (syndrome >> 10) & 0xF
-        let op1 = (syndrome >> 14) & 0x7
-        let op2 = (syndrome >> 17) & 0x7
-        let op0 = (syndrome >> 20) & 0x3
-        let pc = try getReg(HV_REG_PC)
+        let crm = UInt16((syndrome >> 1) & 0xF)
+        let crn = UInt16((syndrome >> 10) & 0xF)
+        let op1 = UInt16((syndrome >> 14) & 0x7)
+        let op2 = UInt16((syndrome >> 17) & 0x7)
+        let op0 = UInt16((syndrome >> 20) & 0x3)
+        let regId = sysRegId(op0, op1, crn, crm, op2)
 
-        // Catch-all: return 0 for reads, ignore writes. This handles system
-        // registers that HVF traps but doesn't emulate natively (the hardware
-        // GIC handles ICC_* registers via hv_gic_create, and EL1 registers
-        // like SCTLR/TCR/TTBR are passed through without trapping).
-        //
-        // Always log — a trapped register that reaches this handler means
-        // the guest read/wrote something the hypervisor doesn't understand.
-        // Silent 0 returns are the hardest bugs to debug.
+        if try handlePMURegister(regId: regId, isRead: isRead, rt: rt) {
+            try setReg(HV_REG_PC, try getReg(HV_REG_PC) + 4)
+            return
+        }
+
+        let pc = try getReg(HV_REG_PC)
         let dir = isRead ? "MRS" : "MSR"
         let regName = "S\(op0)_\(op1)_C\(crn)_C\(crm)_\(op2)"
         print("vCPU[\(index)]: unhandled \(dir) \(regName) " +
               "(rt=x\(rt)) at PC=0x\(String(pc, radix: 16))")
 
-        if isRead {
-            if rt != 31 {
-                try setReg(hv_reg_t(rawValue: UInt32(rt)), 0)
-            }
-        }
-
-        // Advance PC
+        if isRead { try setGPR(rt, 0) }
         try setReg(HV_REG_PC, pc + 4)
     }
 }

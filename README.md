@@ -242,7 +242,7 @@ actions within a multi-frame command's range.
 | ----------------------- | -------------------------------------------------------- |
 | `main.swift`            | Entry point, CLI parsing, device registration, threading |
 | `VirtualMachine.swift`  | VM creation, guest memory, ELF loader, GIC setup         |
-| `VCPU.swift`            | vCPU execution loop, MMIO dispatch, PSCI, timer handling |
+| `VCPU.swift`            | vCPU execution loop, MMIO dispatch, PSCI, timer, PMU     |
 | `DTB.swift`             | Flattened Device Tree generator                          |
 | `PL011.swift`           | PL011 UART emulation (serial output + log buffer)        |
 | `PVPanic.swift`         | pvpanic device (QEMU pvpanic-mmio spec)                  |
@@ -276,6 +276,7 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 | pvpanic  | At `0x09020000` — write `0x01` to signal kernel panic to hypervisor   |
 | GIC      | Hardware GICv3 (distributor `0x08000000`, redistributor `0x080A0000`) |
 | Timer    | Virtual timer (host counter frequency, typically 24 MHz)              |
+| PMU      | Cycle counter only (PMCCNTR_EL0, ~3 GHz synthetic from host clock)    |
 | Boot     | ELF loaded at physical addresses, DTB at RAM base, PSCI for SMP       |
 | Virtio   | MMIO devices at `0x0A000000 + slot * 0x200`, IRQ = SPI `48 + slot`    |
 

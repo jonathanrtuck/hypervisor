@@ -71,8 +71,8 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
   setup
 - `VirtualMachine`: mmap'd guest RAM, ELF loader, GIC setup, vCPU orchestration,
   PSCI state
-- `VCPU`: per-CPU execution loop handling MMIO exits, HVC traps (PSCI), and
-  timer management
+- `VCPU`: per-CPU execution loop handling MMIO exits, HVC traps (PSCI), timer
+  management, and PMU cycle counter emulation
 
 **Virtio transport** (`VirtioMMIO.swift` + `VirtqueueHelper.swift`):
 
@@ -107,6 +107,18 @@ with the PL011 serial log buffer, and writes a timestamped crash report to
 `VCPU.handleDataAbort` → `captureSnapshot` → `writeCrashReport` → `exit(1)`. The
 kernel's panic handler calls `pvpanic_signal()` then `system_off()` (PSCI) as a
 fallback.
+
+**PMU emulation**: `VCPU.handlePMURegister` emulates the ARMv8 PMU cycle counter
+(PMCCNTR_EL0) using `clock_gettime_nsec_np(CLOCK_UPTIME_RAW) × 3` to synthesize
+a ~3 GHz monotonic counter. Hypervisor.framework traps all PMU register accesses
+(MDCR_EL2 is configured internally by HVF), so every MRS/MSR to a PMU register
+exits to the hypervisor. Emulated registers: PMCR_EL0 (control), PMCNTENSET/CLR
+(enable), PMCCNTR_EL0 (cycle count), PMUSERENR_EL0 (EL0 access), PMCCFILTR_EL0
+(filter), PMOVSSET/CLR (overflow), PMINTENSET/CLR_EL1 (interrupt enable),
+PMCEID0/1 (event ID — returns 0, no event counters). N=0 in PMCR (cycle counter
+only, no event counters). The exit overhead (~1-5 μs per access) dominates — not
+suitable for sub-microsecond benchmarking, but usable for coarse timing and
+kernel PMU drivers that expect a functional cycle counter.
 
 **Background mode**: `--background` renders to an offscreen `MTLTexture` — no
 `NSWindow`, no `CAMetalLayer`, no interaction with the macOS window server. Zero
