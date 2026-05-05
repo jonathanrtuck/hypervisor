@@ -809,7 +809,13 @@ final class VCPU {
             vm.psciLock.unlock()
 
             if shouldStart {
-                // Spawn secondary vCPU on a new thread
+                // Commit PSCI return value BEFORE spawning the secondary
+                // thread. hv_vcpu_create on the new thread can race with
+                // hv_vcpu_set_reg on this thread — setting x0 first ensures
+                // the caller's return value is committed before any
+                // concurrent Hypervisor.framework operations begin.
+                try setReg(HV_REG_X0, 0)  // PSCI_SUCCESS
+
                 let vm = self.vm
                 let cpuIdx = targetCpu
                 let entry = entryAddr
@@ -818,16 +824,12 @@ final class VCPU {
                     do {
                         let vcpu = try VCPU(vm: vm, index: cpuIdx,
                                            entryPoint: entry, dtbAddress: ctx)
-                        // x0 = context_id for secondary cores
                         try vcpu.setReg(HV_REG_X0, ctx)
                         try vcpu.run()
                     } catch {
                         print("vCPU[\(cpuIdx)]: failed to start: \(error)")
                     }
                 }
-
-                // Return PSCI_SUCCESS (0)
-                try setReg(HV_REG_X0, 0)
             } else {
                 // Already started or invalid
                 try setReg(HV_REG_X0, UInt64(bitPattern: -2))  // PSCI_ERROR_ALREADY_ON
