@@ -471,9 +471,13 @@ func main() throws {
         dtbDevices.append(DTB.DeviceInfo(slot: slot, deviceId: transport.backend.deviceId))
     }
 
+    let timingInfo = DTB.HvfTimingInfo(
+        gpa: vm.hvfTimingGPA,
+        size: UInt64(HVF_TIMING_PAGE_SIZE)
+    )
     let dtb = DTB.minimal(ramBase: config.ramBase, ramSize: config.ramSize,
                           cpuCount: config.cpuCount, virtioDevices: dtbDevices,
-                          module: moduleInfo)
+                          module: moduleInfo, hvfTiming: timingInfo)
     let dtbAddr = config.ramBase
     vm.writeGuest(at: dtbAddr, data: dtb)
     print("  DTB loaded at 0x\(String(dtbAddr, radix: 16)) (\(dtb.count) bytes)")

@@ -53,6 +53,16 @@ final class VirtualMachine {
     /// VM configuration (set after init for crash report metadata).
     var config: Config?
 
+    /// Per-vCPU HVF timing counters. Lives in guest RAM at a fixed GPA so the
+    /// kernel can read it via its identity map. Initialized in `run()` once the
+    /// vCPU count is known.
+    var hvfTiming: HVFTimingPage?
+
+    /// Guest physical address where the HVF timing counter page lives. Aligned
+    /// to 16 KiB (kernel page granule) and placed in the gap between the DTB
+    /// (loaded at `ramBase`) and the kernel ELF (loaded at `ramBase + 0x80000`).
+    var hvfTimingGPA: UInt64 { ramBase &+ 0x4000 }
+
     init(ramSize: Int, ramBase: UInt64, verbose: Bool) throws {
         self.ramBase = ramBase
         self.ramSize = ramSize
@@ -273,6 +283,17 @@ final class VirtualMachine {
         vcpuStarted = Array(repeating: false, count: cpuCount)
         vcpuStarted[0] = true  // CPU 0 starts running
         vcpuEntries[0] = (entryPoint, 0)
+
+        // Initialize HVF timing counter page inside guest RAM.
+        if let host = guestToHost(hvfTimingGPA) {
+            let nrSlots = min(cpuCount, HVF_TIMING_MAX_VCPUS)
+            hvfTiming = HVFTimingPage(hostBase: host, gpa: hvfTimingGPA, nrVcpus: nrSlots)
+            if verbose {
+                print("  HVF timing: counter page at PA 0x\(String(hvfTimingGPA, radix: 16)) (\(nrSlots) slots)")
+            }
+        } else if verbose {
+            print("  HVF timing: skipped (counter page GPA outside guest RAM)")
+        }
 
         // Create and run vCPU 0 on the main thread
         // (Secondary vCPUs will be created when PSCI CPU_ON is called)

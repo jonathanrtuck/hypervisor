@@ -31,8 +31,14 @@ enum DTB {
         let end: UInt64    // Physical address (exclusive)
     }
 
+    /// HVF timing counter page advertisement.
+    struct HvfTimingInfo {
+        let gpa: UInt64
+        let size: UInt64
+    }
+
     /// Generate a DTB with memory, GIC, timer, UART, PSCI, CPUs, and virtio devices.
-    static func minimal(ramBase: UInt64, ramSize: Int, cpuCount: Int = 4, virtioDevices: [DeviceInfo] = [], module: ModuleInfo? = nil) -> Data {
+    static func minimal(ramBase: UInt64, ramSize: Int, cpuCount: Int = 4, virtioDevices: [DeviceInfo] = [], module: ModuleInfo? = nil, hvfTiming: HvfTimingInfo? = nil) -> Data {
         var b = FDTBuilder()
 
         let gicPhandle: UInt32 = 1
@@ -120,6 +126,17 @@ enum DTB {
             b.endNode()
         }
         b.endNode()
+
+        // HVF timing counter page (paravirtual). Advertised so the guest
+        // kernel can map the page and read per-vCPU host/guest tick splits +
+        // exit-class counters. The compatible string locks the wire format
+        // version; bump to v2 if the slot layout ever changes.
+        if let timing = hvfTiming {
+            b.beginNode("hvf-timing@\(String(timing.gpa, radix: 16))")
+            b.prop_string("compatible", "arts,hvf-timing-v1")
+            b.prop_reg(timing.gpa, timing.size)
+            b.endNode()
+        }
 
         // Virtio MMIO device nodes
         for dev in virtioDevices {

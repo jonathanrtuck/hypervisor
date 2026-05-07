@@ -63,6 +63,9 @@ final class VCPU {
     private var timerMaskedCval: UInt64 = 0
     /// Suppresses repeated "unsupported granule" warnings in translateGuestVA.
     private var loggedGranuleWarning = false
+    /// HVF timing slot for this vCPU. Reset to nil if VM has no timing page
+    /// (e.g., counter GPA outside RAM). Updates are no-ops in that case.
+    private var timingSlot: HVFTimingSlot?
 
     // MARK: PMU emulation state
     private var pmuControl: UInt64 = 0
@@ -77,6 +80,7 @@ final class VCPU {
     init(vm: VirtualMachine, index: Int, entryPoint: UInt64, dtbAddress: UInt64) throws {
         self.vm = vm
         self.index = index
+        self.timingSlot = vm.hvfTiming?.slot(forVcpu: index)
 
         // Create vCPU
         var vcpu: UInt64 = 0
@@ -187,7 +191,14 @@ final class VCPU {
                 }
             }
 
+            // mach_absolute_time on Apple Silicon ticks at the same 24 MHz rate
+            // as the guest's CNTVCT_EL0, so guest_ticks here is directly
+            // comparable to the kernel's read_cycle_counter() values.
+            let t0 = mach_absolute_time()
             let result = hv_vcpu_run(vcpuId)
+            let t1 = mach_absolute_time()
+            timingSlot?.addGuestTicks(t1 &- t0)
+
             if result != HV_SUCCESS {
                 let pc = try getReg(HV_REG_PC)
                 print("vCPU[\(index)]: hv_vcpu_run failed: \(result) at PC=0x\(String(pc, radix: 16))")
@@ -196,6 +207,12 @@ final class VCPU {
 
             exitCount += 1
             let reason = exitInfo.pointee.reason.rawValue
+
+            // Classify the exit by ESR EC and bump the per-class counter.
+            // For HV_EXIT_REASON_VTIMER (2), the EC is irrelevant; the slot
+            // method handles the dispatch.
+            let esrEc: UInt8 = UInt8((exitInfo.pointee.exception.syndrome >> 26) & 0x3F)
+            timingSlot?.recordExit(reason: reason, esrExceptionClass: esrEc)
 
             // Verbose logging for first exits to debug boot
             if vm.verbose && exitCount <= 10 {
@@ -226,6 +243,13 @@ final class VCPU {
             }
 
             try handleExit(reason)
+
+            // Attribute everything between hv_vcpu_run's return (t1 above) and
+            // the next loop iteration's hv_vcpu_run entry to host_ticks. This
+            // captures register reads, exit decoding, MMIO emulation, and the
+            // verbose-mode logging — i.e., the cost of taking a VMEXIT.
+            let t2 = mach_absolute_time()
+            timingSlot?.addHostTicks(t2 &- t1)
         }
 
         if exitCount >= maxExits {
