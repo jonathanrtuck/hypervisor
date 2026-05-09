@@ -271,10 +271,16 @@ final class VirtioMMIOTransport {
     }
 
     /// Acknowledge (clear) interrupt bits. Called from guest MMIO write.
+    /// When all bits are cleared, deasserts the SPI in the hardware GIC.
     func acknowledgeInterrupt(_ mask: UInt32) {
         interruptLock.lock()
         _interruptStatus &= ~mask
+        let cleared = _interruptStatus == 0
         interruptLock.unlock()
+
+        if cleared {
+            hv_gic_set_spi(irq, false)
+        }
     }
 
     /// Access the current state of a virtqueue (for input event injection from the host).
