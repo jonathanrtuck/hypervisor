@@ -47,6 +47,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     var displayWidth: UInt32 = 1024
     var displayHeight: UInt32 = 768
     var displayRefreshHz: UInt32 = 60
+    var displayScale: UInt32 = 1
 
     // Frame capture state
     private(set) var presentCount: Int = 0
@@ -140,6 +141,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         self.displayHeight = UInt32(drawableSize.height)
         if let screen = NSScreen.main {
             self.displayRefreshHz = UInt32(screen.maximumFramesPerSecond)
+            self.displayScale = UInt32(screen.backingScaleFactor)
         }
 
         // Vertex descriptor matching the guest's Vertex struct:
@@ -261,6 +263,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         case 0x00: return displayWidth
         case 0x04: return displayHeight
         case 0x08: return displayRefreshHz
+        case 0x0C: return displayScale
         default: return 0
         }
     }
