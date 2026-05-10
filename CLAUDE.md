@@ -88,6 +88,9 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 | `VirtioInputBackend` | `VirtioInput.swift` | 18               | AppKit (NSEvent) |
 | `VirtioMetalBackend` | `VirtioMetal.swift` | 22 (custom)      | Metal            |
 | `VirtioBlockBackend` | `VirtioBlock.swift` | 2                | Foundation (FS)  |
+| `VirtioSoundBackend` | `VirtioSound.swift` | 25               | AudioToolbox     |
+| `VirtioNetBackend`   | `VirtioNet.swift`   | 1                | vmnet            |
+| `VirtioRngBackend`   | `VirtioRng.swift`   | 4                | Security         |
 
 **Display** (`AppWindow.swift`): NSWindow + CAMetalLayer + macOS input
 forwarding (interactive mode only). Converts NSEvent keyboard/mouse events into

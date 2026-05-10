@@ -17,6 +17,10 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("Metal"),
                 .linkedFramework("QuartzCore"),
+                .linkedFramework("Security"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CoreAudio"),
+                .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "vmnet"]),
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",

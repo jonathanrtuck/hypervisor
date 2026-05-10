@@ -1,11 +1,15 @@
 BINARY = .build/debug/hypervisor
 ENTITLEMENTS = hypervisor.entitlements
+ENTITLEMENTS_NET = hypervisor-net.entitlements
 
 build:
 	swift build 2>&1
 
 sign: build
 	codesign --entitlements $(ENTITLEMENTS) --force -s - $(BINARY)
+
+sign-net: build
+	codesign --entitlements $(ENTITLEMENTS_NET) --force -s - $(BINARY)
 
 # Run with Metal GPU display — pass KERNEL=path/to/kernel.elf
 run: sign
@@ -45,4 +49,4 @@ uninstall:
 clean:
 	swift package clean
 
-.PHONY: build sign run run-verbose run-serial install uninstall clean
+.PHONY: build sign sign-net run run-verbose run-serial install uninstall clean

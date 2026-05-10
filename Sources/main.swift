@@ -10,11 +10,15 @@
 ///   2: virtio-input (tablet / absolute pointer)
 ///   3: virtio-metal (Metal command passthrough — device ID 22)
 ///   4: virtio-blk  (file-backed block device, optional)
+///   5: virtio-snd  (audio I/O via Core Audio, optional)
+///   6: virtio-net  (networking via vmnet.framework, optional)
+///   7: virtio-rng  (entropy source, always present)
 
 import Foundation
 import AppKit
 import Hypervisor
 import Metal
+import Security
 
 /// Global flag set by SIGUSR1 signal handler. Checked by VirtioMetal on each frame.
 /// Uses Int32 (matches sig_atomic_t) for signal-handler safety.
@@ -37,6 +41,8 @@ struct Config {
     let capturePath: String
     let eventsFile: String?
     let resolution: (Int, Int)?
+    let audio: Bool
+    let net: Bool
     let timeout: Int?
 
     var ramSize: Int { ramMiB * 1024 * 1024 }
@@ -62,6 +68,8 @@ func printUsage() {
     print("  --capture N PATH     Capture frame_id N as PNG to PATH, then exit")
     print("  --capture N,M,.. PFX Capture multiple frame_ids as PFX-NNN.png")
     print("  --events FILE        Run event script (evdev input injection + captures)")
+    print("  --audio              Enable audio output/input (virtio-snd)")
+    print("  --net                Enable networking (virtio-net, vmnet NAT)")
     print("  --resolution WxH     Fixed pixel resolution (e.g., 800x600)")
     print("  --timeout SECS       Exit with code 2 if not done within SECS seconds")
     print("")
@@ -90,6 +98,8 @@ func parseArgs() -> Config {
     var captureFrames: Set<Int> = []
     var capturePath = "/tmp/hypervisor-capture.png"
     var eventsFile: String?
+    var audio = false
+    var net = false
     var resolution: (Int, Int)?
     var timeout: Int?
 
@@ -106,6 +116,10 @@ func parseArgs() -> Config {
             windowed = true
         case "--background":
             background = true
+        case "--audio":
+            audio = true
+        case "--net":
+            net = true
         case "--ram":
             guard i + 1 < args.count, let val = Int(args[i + 1]), val > 0 else {
                 print("Error: --ram requires a positive integer (MiB)")
@@ -232,6 +246,8 @@ func parseArgs() -> Config {
         capturePath: capturePath,
         eventsFile: eventsFile,
         resolution: resolution,
+        audio: audio,
+        net: net,
         timeout: timeout
     )
 }
@@ -319,6 +335,31 @@ func main() throws {
         vm.addVirtioDevice(slot: 4, backend: block)
         print("  Block device: \(path) (\(block.deviceId == 2 ? "virtio-blk" : "?"))")
     }
+
+    // Slot 5: virtio-snd (optional)
+    if config.audio {
+        let sound = VirtioSoundBackend()
+        vm.addVirtioDevice(slot: 5, backend: sound)
+        print("  Audio: enabled (slot 5)")
+    } else {
+        print("  Audio: disabled")
+    }
+
+    // Slot 6: virtio-net (optional)
+    if config.net {
+        if let netBackend = VirtioNetBackend.create(verbose: config.verbose) {
+            vm.addVirtioDevice(slot: 6, backend: netBackend)
+            print("  Network: enabled (slot 6)")
+        } else {
+            print("  Network: failed to start vmnet (check entitlements)")
+        }
+    } else {
+        print("  Network: disabled")
+    }
+
+    // Slot 7: virtio-rng (always present)
+    let rng = VirtioRngBackend()
+    vm.addVirtioDevice(slot: 7, backend: rng)
 
     // Slot 3: Metal GPU (if GPU mode)
     var appWindow: AppWindow?
