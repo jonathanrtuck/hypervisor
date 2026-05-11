@@ -42,6 +42,7 @@ struct Config {
     let eventsFile: String?
     let resolution: (Int, Int)?
     let audio: Bool
+    let audioDumpPath: String?
     let net: Bool
     let timeout: Int?
 
@@ -69,6 +70,7 @@ func printUsage() {
     print("  --capture N,M,.. PFX Capture multiple frame_ids as PFX-NNN.png")
     print("  --events FILE        Run event script (evdev input injection + captures)")
     print("  --audio              Enable audio output/input (virtio-snd)")
+    print("  --audio-dump PATH    Dump received PCM to WAV file (requires --audio)")
     print("  --net                Enable networking (virtio-net, vmnet NAT)")
     print("  --resolution WxH     Fixed pixel resolution (e.g., 800x600)")
     print("  --timeout SECS       Exit with code 2 if not done within SECS seconds")
@@ -99,6 +101,7 @@ func parseArgs() -> Config {
     var capturePath = "/tmp/hypervisor-capture.png"
     var eventsFile: String?
     var audio = false
+    var audioDumpPath: String?
     var net = false
     var resolution: (Int, Int)?
     var timeout: Int?
@@ -118,6 +121,14 @@ func parseArgs() -> Config {
             background = true
         case "--audio":
             audio = true
+        case "--audio-dump":
+            guard i + 1 < args.count else {
+                print("Error: --audio-dump requires a file path")
+                exit(1)
+            }
+            audioDumpPath = args[i + 1]
+            audio = true
+            i += 1
         case "--net":
             net = true
         case "--ram":
@@ -247,6 +258,7 @@ func parseArgs() -> Config {
         eventsFile: eventsFile,
         resolution: resolution,
         audio: audio,
+        audioDumpPath: audioDumpPath,
         net: net,
         timeout: timeout
     )
@@ -337,9 +349,11 @@ func main() throws {
     }
 
     // Slot 5: virtio-snd (optional)
+    var soundBackend: VirtioSoundBackend?
     if config.audio {
-        let sound = VirtioSoundBackend()
+        let sound = VirtioSoundBackend(dumpPath: config.audioDumpPath)
         vm.addVirtioDevice(slot: 5, backend: sound)
+        soundBackend = sound
         print("  Audio: enabled (slot 5)")
     } else {
         print("  Audio: disabled")
@@ -472,6 +486,7 @@ func main() throws {
                     case .capture:
                         break // Handled via captureFrames
                     case .exit:
+                        soundBackend?.finalizeDump()
                         exit(0)
                     }
                 }

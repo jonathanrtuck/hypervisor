@@ -47,15 +47,21 @@ private let VIRTIO_SND_PCM_RATE_96000: UInt64 = 1 << 8
 /// Single-producer, single-consumer ring buffer using atomic indices.
 /// The producer (vCPU thread) writes audio data; the consumer (Core Audio
 /// real-time thread) reads it. No locks — the real-time thread must never block.
+/// SPSC ring buffer using aligned atomic indices for lock-free operation.
+/// Producer: vCPU thread (write). Consumer: Core Audio real-time thread (read).
+/// ARM64 guarantees atomic aligned 64-bit loads/stores; barriers enforce ordering.
 private final class AudioRingBuffer {
     private let buffer: UnsafeMutableRawPointer
     private let capacity: Int
-    private var _head: Int = 0  // write position (producer)
-    private var _tail: Int = 0  // read position (consumer)
+    // Aligned 64-bit values — atomic on ARM64. Accessed via volatile-style
+    // pointer operations to prevent Swift from caching in registers.
+    private let headPtr: UnsafeMutablePointer<Int>
+    private let tailPtr: UnsafeMutablePointer<Int>
 
     var fillLevel: Int {
-        let h = _head
-        let t = _tail
+        OSMemoryBarrier()
+        let h = headPtr.pointee
+        let t = tailPtr.pointee
         return h >= t ? h - t : capacity - t + h
     }
 
@@ -63,18 +69,27 @@ private final class AudioRingBuffer {
         self.capacity = capacity
         self.buffer = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 16)
         self.buffer.initializeMemory(as: UInt8.self, repeating: 0, count: capacity)
+        self.headPtr = .allocate(capacity: 1)
+        self.headPtr.initialize(to: 0)
+        self.tailPtr = .allocate(capacity: 1)
+        self.tailPtr.initialize(to: 0)
     }
 
     deinit {
         buffer.deallocate()
+        headPtr.deallocate()
+        tailPtr.deallocate()
     }
 
     func write(_ src: UnsafeRawPointer, count: Int) -> Int {
-        let available = capacity - fillLevel - 1
+        let h = headPtr.pointee
+        OSMemoryBarrier()
+        let t = tailPtr.pointee
+        let fill = h >= t ? h - t : capacity - t + h
+        let available = capacity - fill - 1
         let toWrite = min(count, available)
         guard toWrite > 0 else { return 0 }
 
-        let h = _head
         let firstChunk = min(toWrite, capacity - h)
         buffer.advanced(by: h).copyMemory(from: src, byteCount: firstChunk)
         if toWrite > firstChunk {
@@ -82,25 +97,27 @@ private final class AudioRingBuffer {
         }
 
         OSMemoryBarrier()
-        _head = (h + toWrite) % capacity
+        headPtr.pointee = (h + toWrite) % capacity
 
         return toWrite
     }
 
     func read(_ dst: UnsafeMutableRawPointer, count: Int) -> Int {
-        let avail = fillLevel
+        let t = tailPtr.pointee
+        OSMemoryBarrier()
+        let h = headPtr.pointee
+        let avail = h >= t ? h - t : capacity - t + h
         let toRead = min(count, avail)
         guard toRead > 0 else { return 0 }
 
-        let t = _tail
         let firstChunk = min(toRead, capacity - t)
         dst.copyMemory(from: buffer.advanced(by: t), byteCount: firstChunk)
         if toRead > firstChunk {
-            dst.advanced(by: firstChunk).copyMemory(from: buffer.advanced(by: t + firstChunk - capacity + capacity), byteCount: toRead - firstChunk)
+            dst.advanced(by: firstChunk).copyMemory(from: buffer, byteCount: toRead - firstChunk)
         }
 
         OSMemoryBarrier()
-        _tail = (t + toRead) % capacity
+        tailPtr.pointee = (t + toRead) % capacity
 
         return toRead
     }
@@ -165,6 +182,59 @@ final class VirtioSoundBackend: VirtioDeviceBackend {
 
     private let eventLock = NSLock()
     private var pendingEvents: [(UInt32)] = []
+
+    private var dumpFile: FileHandle?
+    private var dumpDataBytes: UInt32 = 0
+
+    init(dumpPath: String? = nil) {
+        if let path = dumpPath {
+            FileManager.default.createFile(atPath: path, contents: nil)
+            dumpFile = FileHandle(forWritingAtPath: path)
+            // Write placeholder WAV header (44 bytes) — finalized on close.
+            dumpFile?.write(Data(count: 44))
+        }
+    }
+
+    deinit {
+        finalizeDump()
+    }
+
+    func finalizeDump() {
+        guard let fh = dumpFile else { return }
+        let stream = outputStream
+        let channels: UInt16 = UInt16(stream.channels)
+        let sampleRate: UInt32 = UInt32(stream.sampleRate)
+        let bitsPerSample: UInt16 = UInt16(stream.bitsPerChannel)
+        let blockAlign = channels * (bitsPerSample / 8)
+        let byteRate = sampleRate * UInt32(blockAlign)
+        let dataLen = dumpDataBytes
+        let fileLen = dataLen + 36
+
+        var header = Data(count: 44)
+        header[0...3] = Data("RIFF".utf8)
+        header.replaceSubrange(4..<8, with: withUnsafeBytes(of: fileLen.littleEndian) { Data($0) })
+        header[8...11] = Data("WAVE".utf8)
+        header[12...15] = Data("fmt ".utf8)
+        header.replaceSubrange(16..<20, with: withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) })
+        let fmt: UInt16 = stream.isFloat ? 3 : 1
+        header.replaceSubrange(20..<22, with: withUnsafeBytes(of: fmt.littleEndian) { Data($0) })
+        header.replaceSubrange(22..<24, with: withUnsafeBytes(of: channels.littleEndian) { Data($0) })
+        header.replaceSubrange(24..<28, with: withUnsafeBytes(of: sampleRate.littleEndian) { Data($0) })
+        header.replaceSubrange(28..<32, with: withUnsafeBytes(of: byteRate.littleEndian) { Data($0) })
+        header.replaceSubrange(32..<34, with: withUnsafeBytes(of: blockAlign.littleEndian) { Data($0) })
+        header.replaceSubrange(34..<36, with: withUnsafeBytes(of: bitsPerSample.littleEndian) { Data($0) })
+        header[36...39] = Data("data".utf8)
+        header.replaceSubrange(40..<44, with: withUnsafeBytes(of: dataLen.littleEndian) { Data($0) })
+
+        fh.seek(toFileOffset: 0)
+        fh.write(header)
+        fh.closeFile()
+        dumpFile = nil
+
+        let frames = dataLen / UInt32(blockAlign)
+        let durationMs = frames * 1000 / sampleRate
+        print("VirtioSnd: audio dump finalized (\(dataLen) bytes, \(durationMs)ms)")
+    }
 
     // MARK: - Config space
 
@@ -638,6 +708,12 @@ final class VirtioSoundBackend: VirtioDeviceBackend {
                 guard !buf.isDeviceWritable,
                       let hostPtr = vm.guestToHost(buf.guestAddr) else { continue }
                 _ = outputStream.ring.write(hostPtr, count: Int(buf.length))
+
+                if let fh = dumpFile {
+                    let data = Data(bytes: hostPtr, count: Int(buf.length))
+                    fh.write(data)
+                    dumpDataBytes += buf.length
+                }
             }
 
             // Write status to last (writable) buffer
