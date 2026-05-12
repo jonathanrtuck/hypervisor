@@ -78,7 +78,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     private var computePipelines: [UInt32: MTLComputePipelineState] = [:]
     private var depthStencilStates: [UInt32: MTLDepthStencilState] = [:]
     private var samplers: [UInt32: MTLSamplerState] = [:]
-    private var textures: [UInt32: MTLTexture] = [:]
+    private let textureRegistry: TextureRegistry
 
     // Vertex descriptor (must match guest's vertex layout)
     private let vertexDescriptor: MTLVertexDescriptor
@@ -130,10 +130,11 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     /// Metal access is serialized.
     private var displayTimer: DispatchSourceTimer?
 
-    init(device: MTLDevice, layer: CAMetalLayer) {
+    init(device: MTLDevice, layer: CAMetalLayer, textureRegistry: TextureRegistry) {
         self.device = device
         self.commandQueue = device.makeCommandQueue()!
         self.layer = layer
+        self.textureRegistry = textureRegistry
 
         // Read native resolution from the layer's drawable size (set by AppWindow).
         let drawableSize = layer.drawableSize
@@ -189,10 +190,11 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     /// Headless init — no window, no CAMetalLayer. Renders to an offscreen
     /// texture. Used for automated captures (--background) to avoid any
     /// interaction with the macOS window server.
-    init(device: MTLDevice, width: Int, height: Int) {
+    init(device: MTLDevice, width: Int, height: Int, textureRegistry: TextureRegistry) {
         self.device = device
         self.commandQueue = device.makeCommandQueue()!
         self.layer = nil
+        self.textureRegistry = textureRegistry
         self.displayWidth = UInt32(width)
         self.displayHeight = UInt32(height)
         if let screen = NSScreen.main {
@@ -610,7 +612,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             desc.storageMode = (usage & 0x04) != 0 ? .private : .managed
 
             if let tex = device.makeTexture(descriptor: desc) {
-                textures[handle] = tex
+                textureRegistry.register(guest: handle, texture: tex)
                 if verbose { print("VirtioMetal: texture \(handle) (\(width)×\(height) type=\(textureType))") }
             }
 
@@ -623,7 +625,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let h      = payload.loadUnaligned(fromByteOffset: 10, as: UInt16.self)
             let bpr    = payload.loadUnaligned(fromByteOffset: 12, as: UInt32.self)
 
-            guard let tex = textures[handle] else { return }
+            guard let tex = textureRegistry.lookup(handle) else { return }
             let dataOffset = 16
             guard size >= dataOffset + Int(bpr) * Int(h) else { return }
 
@@ -642,7 +644,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             computePipelines.removeValue(forKey: handle)
             depthStencilStates.removeValue(forKey: handle)
             samplers.removeValue(forKey: handle)
-            textures.removeValue(forKey: handle)
+            textureRegistry.remove(handle)
         }
     }
 
@@ -673,7 +675,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 guard let tex = resolveDrawable() else { return }
                 colorTexture = tex
             } else {
-                guard let tex = textures[colorTex] else { return }
+                guard let tex = textureRegistry.lookup(colorTex) else { return }
                 colorTexture = tex
             }
 
@@ -683,7 +685,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             } else if resolveTex == 0 {
                 resolveTexture = nil
             } else {
-                resolveTexture = textures[resolveTex]
+                resolveTexture = textureRegistry.lookup(resolveTex)
             }
 
             // Lazily create the per-frame command buffer
@@ -700,7 +702,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 red: Double(clearR), green: Double(clearG),
                 blue: Double(clearB), alpha: Double(clearA))
 
-            if stencilTex != 0, let sTex = textures[stencilTex] {
+            if stencilTex != 0, let sTex = textureRegistry.lookup(stencilTex) {
                 passDesc.stencilAttachment.texture = sTex
                 passDesc.stencilAttachment.loadAction = .clear
                 passDesc.stencilAttachment.storeAction = .dontCare
@@ -755,7 +757,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             guard size >= 8 else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             let idx = payload.loadUnaligned(fromByteOffset: 4, as: UInt8.self)
-            if let tex = textures[handle] {
+            if let tex = textureRegistry.lookup(handle) {
                 currentRenderEncoder?.setFragmentTexture(tex, index: Int(idx))
             }
 
@@ -815,7 +817,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             if handle == DRAWABLE_HANDLE {
                 tex = resolveDrawable()
             } else {
-                tex = textures[handle]
+                tex = textureRegistry.lookup(handle)
             }
             if let tex {
                 currentComputeEncoder?.setTexture(tex, index: Int(idx))
@@ -864,8 +866,8 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let dy = payload.loadUnaligned(fromByteOffset: 18, as: UInt16.self)
 
             // DRAWABLE_HANDLE → use the current drawable's texture.
-            let srcTex: MTLTexture? = srcHandle == DRAWABLE_HANDLE ? resolveDrawable() : textures[srcHandle]
-            let dstTex: MTLTexture? = dstHandle == DRAWABLE_HANDLE ? resolveDrawable() : textures[dstHandle]
+            let srcTex: MTLTexture? = srcHandle == DRAWABLE_HANDLE ? resolveDrawable() : textureRegistry.lookup(srcHandle)
+            let dstTex: MTLTexture? = dstHandle == DRAWABLE_HANDLE ? resolveDrawable() : textureRegistry.lookup(dstHandle)
             guard let srcTex, let dstTex else { return }
             currentBlitEncoder?.copy(
                 from: srcTex, sourceSlice: 0, sourceLevel: 0,
@@ -963,7 +965,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let hotX = Int(payload.loadUnaligned(fromByteOffset: 8, as: Int16.self))
             let hotY = Int(payload.loadUnaligned(fromByteOffset: 10, as: Int16.self))
             guard w > 0, h > 0, w <= 256, h <= 256,
-                  let tex = textures[handle] else { return }
+                  let tex = textureRegistry.lookup(handle) else { return }
 
             // Encode the blit on the CURRENT command buffer (after the cursor
             // render passes that wrote to the texture). The actual pixel

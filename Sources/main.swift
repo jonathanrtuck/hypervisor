@@ -13,6 +13,7 @@
 ///   5: virtio-snd  (audio I/O via Core Audio, optional)
 ///   6: virtio-net  (networking via vmnet.framework, optional)
 ///   7: virtio-rng  (entropy source, always present)
+///   8: virtio-video-decode (hardware video decode via VideoToolbox, optional)
 
 import Foundation
 import AppKit
@@ -44,6 +45,7 @@ struct Config {
     let audio: Bool
     let audioDumpPath: String?
     let net: Bool
+    let videoDecode: Bool
     let timeout: Int?
 
     var ramSize: Int { ramMiB * 1024 * 1024 }
@@ -72,6 +74,7 @@ func printUsage() {
     print("  --audio              Enable audio output/input (virtio-snd)")
     print("  --audio-dump PATH    Dump received PCM to WAV file (requires --audio)")
     print("  --net                Enable networking (virtio-net, vmnet NAT)")
+    print("  --video-decode       Enable hardware video decode (virtio-video, VideoToolbox)")
     print("  --resolution WxH     Fixed pixel resolution (e.g., 800x600)")
     print("  --timeout SECS       Exit with code 2 if not done within SECS seconds")
     print("")
@@ -103,6 +106,7 @@ func parseArgs() -> Config {
     var audio = false
     var audioDumpPath: String?
     var net = false
+    var videoDecode = false
     var resolution: (Int, Int)?
     var timeout: Int?
 
@@ -131,6 +135,8 @@ func parseArgs() -> Config {
             i += 1
         case "--net":
             net = true
+        case "--video-decode":
+            videoDecode = true
         case "--ram":
             guard i + 1 < args.count, let val = Int(args[i + 1]), val > 0 else {
                 print("Error: --ram requires a positive integer (MiB)")
@@ -260,6 +266,7 @@ func parseArgs() -> Config {
         audio: audio,
         audioDumpPath: audioDumpPath,
         net: net,
+        videoDecode: videoDecode,
         timeout: timeout
     )
 }
@@ -381,6 +388,8 @@ func main() throws {
     if !config.noGpu {
         let bg = config.background
         let backend: VirtioMetalBackend
+        let textureRegistry = TextureRegistry()
+        let metalDevice: MTLDevice
 
         if bg {
             // Headless mode: render to an offscreen texture. No window, no
@@ -388,6 +397,7 @@ func main() throws {
             guard let device = MTLCreateSystemDefaultDevice() else {
                 fatalError("Metal is not supported on this system")
             }
+            metalDevice = device
             let screen = NSScreen.main ?? NSScreen.screens[0]
             let sf = screen.backingScaleFactor
             let (w, h): (Int, Int)
@@ -396,14 +406,15 @@ func main() throws {
             } else {
                 (w, h) = (Int(screen.frame.width * sf), Int(screen.frame.height * sf))
             }
-            backend = VirtioMetalBackend(device: device, width: w, height: h)
+            backend = VirtioMetalBackend(device: device, width: w, height: h, textureRegistry: textureRegistry)
         } else {
             // Windowed mode: create AppWindow with CAMetalLayer.
             let app = NSApplication.shared
             app.setActivationPolicy(.regular)
             let window = AppWindow(windowed: config.windowed, resolution: config.resolution, background: false)
             appWindow = window
-            backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
+            metalDevice = window.metalDevice
+            backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer, textureRegistry: textureRegistry)
         }
 
         backend.verbose = config.verbose
@@ -412,6 +423,15 @@ func main() throws {
         backend.multiCapture = config.captureFrames.count > 1
         vm.addVirtioDevice(slot: 3, backend: backend)
         print("  GPU: Metal passthrough (slot 3)")
+
+        // Slot 8: virtio-video-decode (optional, requires Metal)
+        if config.videoDecode {
+            let videoDec = VirtioVideoDecodeBackend(
+                textureRegistry: textureRegistry,
+                metalDevice: metalDevice)
+            vm.addVirtioDevice(slot: 8, backend: videoDec)
+            print("  Video decode: enabled (slot 8)")
+        }
 
         // ── Event schedule ───────────────────────────────────────────
         // Built from --events file, --capture flags, or both.

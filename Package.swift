@@ -20,6 +20,9 @@ let package = Package(
                 .linkedFramework("Security"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("VideoToolbox"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
                 .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "vmnet"]),
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
