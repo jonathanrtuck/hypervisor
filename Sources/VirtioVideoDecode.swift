@@ -107,6 +107,7 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
     private var sessions: [UInt32: VideoDecodeSession] = [:]
     private var lastAvailIdx: [UInt16] = [0, 0]
     private let supportedCodecs: UInt32
+    private var decodeCount: Int = 0
 
     init(textureRegistry: TextureRegistry, metalDevice: MTLDevice) {
         self.textureRegistry = textureRegistry
@@ -471,6 +472,13 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
         // Update the shared texture with the decoded IOSurface
         session.lastDecodedBuffer = decodedBuffer
         updateTexture(for: session, pixelBuffer: decodedBuffer)
+
+        decodeCount += 1
+        if decodeCount == 1 {
+            print("VirtioVideoDecode: first frame decoded via VideoToolbox"
+                  + " (\(session.width)×\(session.height),"
+                  + " \(compressedSize) bytes compressed)")
+        }
 
         // Copy pixels to guest memory if pixel output descriptor is present
         var bytesWritten: UInt32 = 0
