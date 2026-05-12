@@ -125,10 +125,9 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     // Dedicated GPU thread
     private let gpuThread = GPUThread()
 
-    /// Display-cadence timer — handles SIGUSR1 ad-hoc captures only.
-    /// independently of GPU submission. Fires on the GPU queue so all
-    /// Metal access is serialized.
-    private var displayTimer: DispatchSourceTimer?
+    /// Display link — fires at the host display's native refresh rate.
+    /// Injects a vsync SPI to the guest and handles SIGUSR1 captures.
+    private var displayLink: CADisplayLink?
 
     init(device: MTLDevice, layer: CAMetalLayer, textureRegistry: TextureRegistry) {
         self.device = device
@@ -266,6 +265,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         case 0x04: return displayHeight
         case 0x08: return displayRefreshHz
         case 0x0C: return displayScale
+        case 0x10: return vsyncCounter
         default: return 0
         }
     }
@@ -287,29 +287,29 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         }
     }
 
-    // MARK: - Display-cadence timer
+    // MARK: - Display link (vsync)
 
-    /// Start the display-cadence timer on the GPU queue.
-    /// Called on the first presentAndCommit. Only used for SIGUSR1 ad-hoc
-    /// captures — scheduled captures and event scripts are driven by presents.
-    private func startDisplayTimer() {
-        guard displayTimer == nil else { return }
-        let interval = 1.0 / Double(displayRefreshHz)
-        let timer = DispatchSource.makeTimerSource(queue: gpuThread.queue)
-        timer.schedule(deadline: .now() + interval, repeating: interval)
-        timer.setEventHandler { [weak self] in
-            self?.displayTick()
-        }
-        displayTimer = timer
-        timer.resume()
+    /// Start the display link. Fires at the host display's native refresh
+    /// rate. Each tick injects a vsync SPI to the guest and handles
+    /// SIGUSR1 ad-hoc captures.
+    private func startDisplayLink() {
+        guard displayLink == nil else { return }
+        guard let screen = NSScreen.main else { return }
+        let link = screen.displayLink(target: self, selector: #selector(displayLinkFired))
+        link.add(to: RunLoop.main, forMode: RunLoop.Mode.common)
+        displayLink = link
     }
 
-    /// Display tick: only handles SIGUSR1 ad-hoc captures.
-    /// Scheduled captures and event scripts are driven by presentAndCommit.
-    private func displayTick() {
+    private var vsyncCounter: UInt32 = 0
+
+    @objc private func displayLinkFired(_ link: CADisplayLink) {
+        vsyncCounter &+= 1
+
         if _signalCaptureFlag != 0 {
             _signalCaptureFlag = 0
-            captureRetainedFrame(frameId: presentCount)
+            gpuThread.runSync {
+                self.captureRetainedFrame(frameId: self.presentCount)
+            }
         }
     }
 
@@ -693,10 +693,22 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 currentCommandBuffer = commandQueue.makeCommandBuffer()
             }
 
+            let isBlitRetained = MetalLoadActionWire(rawValue: loadAct) == .blitRetained
+            if isBlitRetained, let retained = retainedFrame, let cb = currentCommandBuffer {
+                let sz = MTLSize(width: colorTexture.width, height: colorTexture.height, depth: 1)
+                let origin = MTLOrigin(x: 0, y: 0, z: 0)
+                let blit = cb.makeBlitCommandEncoder()!
+                blit.copy(from: retained, sourceSlice: 0, sourceLevel: 0,
+                          sourceOrigin: origin, sourceSize: sz,
+                          to: colorTexture, destinationSlice: 0, destinationLevel: 0,
+                          destinationOrigin: origin)
+                blit.endEncoding()
+            }
+
             let passDesc = MTLRenderPassDescriptor()
             passDesc.colorAttachments[0].texture = colorTexture
             passDesc.colorAttachments[0].resolveTexture = resolveTexture
-            passDesc.colorAttachments[0].loadAction = mapLoadAction(loadAct)
+            passDesc.colorAttachments[0].loadAction = isBlitRetained ? .dontCare : mapLoadAction(loadAct)
             passDesc.colorAttachments[0].storeAction = mapStoreAction(storeAct)
             passDesc.colorAttachments[0].clearColor = MTLClearColor(
                 red: Double(clearR), green: Double(clearG),
@@ -1147,8 +1159,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             onFrame?(frameId)
             presentCount += 1
 
-            // Start display timer on first present (for SIGUSR1 only).
-            startDisplayTimer()
+            startDisplayLink()
         }
     }
 
@@ -1238,6 +1249,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         }
     }
 
+
     // MARK: - Wire format → Metal type mappings
 
     private func mapPixelFormat(_ wire: UInt8) -> MTLPixelFormat {
@@ -1262,10 +1274,11 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
     private func mapLoadAction(_ wire: UInt8) -> MTLLoadAction {
         switch MetalLoadActionWire(rawValue: wire) {
-        case .dontCare: return .dontCare
-        case .load:     return .load
-        case .clear:    return .clear
-        case .none:     return .dontCare
+        case .dontCare:      return .dontCare
+        case .load:          return .load
+        case .clear:         return .clear
+        case .blitRetained:  return .dontCare
+        case .none:          return .dontCare
         }
     }
 

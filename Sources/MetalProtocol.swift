@@ -236,9 +236,10 @@ enum MetalPrimitiveTypeWire: UInt8 {
 // MARK: - Load/store action mapping
 
 enum MetalLoadActionWire: UInt8 {
-    case dontCare = 0
-    case load     = 1
-    case clear    = 2
+    case dontCare      = 0
+    case load          = 1
+    case clear         = 2
+    case blitRetained  = 3
 }
 
 enum MetalStoreActionWire: UInt8 {
