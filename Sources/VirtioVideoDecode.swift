@@ -109,6 +109,14 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
     private let supportedCodecs: UInt32
     private var decodeCount: Int = 0
 
+    // Decode metrics
+    private var metricsDecodeCount: Int = 0
+    private var metricsDecodeTotalUs: Double = 0
+    private var metricsDecodeMaxUs: Double = 0
+    private var metricsCopyCount: Int = 0
+    private var metricsCopyTotalUs: Double = 0
+    private var metricsCopyMaxUs: Double = 0
+
     init(textureRegistry: TextureRegistry, metalDevice: MTLDevice) {
         self.textureRegistry = textureRegistry
         self.metalDevice = metalDevice
@@ -390,6 +398,8 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
     private func processDecodeRequest(_ buffers: [VirtqueueBuffer],
                                        vm: VirtualMachine) -> UInt32
     {
+        let totalT0 = CFAbsoluteTimeGetCurrent()
+
         // Descriptor 0: frame header (readable, 20 bytes)
         guard let headerBuf = buffers.first,
               !headerBuf.isDeviceWritable,
@@ -452,6 +462,7 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
 
         // Synchronous decode — callback fires inline
         let result = FrameDecodeResult()
+        let vtT0 = CFAbsoluteTimeGetCurrent()
         let decodeStatus = VTDecompressionSessionDecodeFrame(
             session.vtSession,
             sampleBuffer: sampleBuffer,
@@ -459,6 +470,7 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
             frameRefcon: Unmanaged.passUnretained(result).toOpaque(),
             infoFlagsOut: nil
         )
+        let vtUs = (CFAbsoluteTimeGetCurrent() - vtT0) * 1_000_000
 
         guard decodeStatus == noErr, result.status == noErr,
               let decodedBuffer = result.pixelBuffer
@@ -468,6 +480,10 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
                 bytesWritten: 0, timestampNs: timestampNs, durationNs: 0)
             return statusBuf.length
         }
+
+        metricsDecodeCount += 1
+        metricsDecodeTotalUs += vtUs
+        if vtUs > metricsDecodeMaxUs { metricsDecodeMaxUs = vtUs }
 
         // Update the shared texture with the decoded IOSurface
         session.lastDecodedBuffer = decodedBuffer
@@ -482,10 +498,16 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
 
         // Copy pixels to guest memory if pixel output descriptor is present
         var bytesWritten: UInt32 = 0
+        var copyUs: Double = 0
         if let pixelPtr, let pixelBuf {
+            let copyT0 = CFAbsoluteTimeGetCurrent()
             bytesWritten = copyPixels(
                 from: decodedBuffer, to: pixelPtr,
                 maxBytes: pixelBuf.length)
+            copyUs = (CFAbsoluteTimeGetCurrent() - copyT0) * 1_000_000
+            metricsCopyCount += 1
+            metricsCopyTotalUs += copyUs
+            if copyUs > metricsCopyMaxUs { metricsCopyMaxUs = copyUs }
         }
 
         let durationNs = UInt64(session.width) > 0 ? UInt64(0) : 0
@@ -494,6 +516,9 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
             statusPtr, status: VDEC_OK,
             bytesWritten: bytesWritten,
             timestampNs: timestampNs, durationNs: durationNs)
+
+        let totalUs = (CFAbsoluteTimeGetCurrent() - totalT0) * 1_000_000
+        print("vdecode: dt=\(Int(totalUs))us vt=\(Int(vtUs))us copy=\(Int(copyUs))us (\(decodeCount) total)")
 
         // Total bytes written to all writable descriptors
         return bytesWritten + statusBuf.length

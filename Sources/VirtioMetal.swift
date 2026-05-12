@@ -43,6 +43,29 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     /// Tracks unknown command IDs already logged (log each ID only once).
     private var loggedUnknownCommands: Set<UInt16> = []
 
+    // MARK: - Pipeline metrics
+
+    private struct PipelineMetrics {
+        var setupCount: Int = 0
+        var setupTotalUs: Double = 0
+        var renderCount: Int = 0
+        var renderTotalUs: Double = 0
+        var presentCount: Int = 0
+        var presentTotalUs: Double = 0
+        var presentMaxUs: Double = 0
+        var uploadCount: Int = 0
+        var uploadTotalUs: Double = 0
+
+        mutating func reset() {
+            setupCount = 0; setupTotalUs = 0
+            renderCount = 0; renderTotalUs = 0
+            presentCount = 0; presentTotalUs = 0; presentMaxUs = 0
+            uploadCount = 0; uploadTotalUs = 0
+        }
+    }
+
+    private var metrics = PipelineMetrics()
+
     // Display dimensions and refresh rate (set from layer/screen at init)
     var displayWidth: UInt32 = 1024
     var displayHeight: UInt32 = 768
@@ -352,7 +375,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     // MARK: - Setup queue (object creation)
 
     private func processSetupQueue(state: VirtqueueState, vm: VirtualMachine) {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        var didWork = false
         while let request = virtqueuePopAvail(state: state, vm: vm, lastSeenIdx: &lastAvailIdx[0]) {
+            didWork = true
             // Gather input data
             var inputData = Data()
             for buf in request.buffers where !buf.isDeviceWritable {
@@ -370,12 +396,20 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             virtqueuePushUsed(state: state, vm: vm, headIndex: request.headIndex, bytesWritten: 0)
             raiseInterrupt(vm: vm)
         }
+        if didWork {
+            let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1_000_000
+            metrics.setupCount += 1
+            metrics.setupTotalUs += elapsed
+        }
     }
 
     // MARK: - Render queue (per-frame commands)
 
     private func processRenderQueue(state: VirtqueueState, vm: VirtualMachine) {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        var didWork = false
         while let request = virtqueuePopAvail(state: state, vm: vm, lastSeenIdx: &lastAvailIdx[1]) {
+            didWork = true
             var inputData = Data()
             for buf in request.buffers where !buf.isDeviceWritable {
                 if let host = vm.guestToHost(buf.guestAddr) {
@@ -389,6 +423,11 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
             virtqueuePushUsed(state: state, vm: vm, headIndex: request.headIndex, bytesWritten: 0)
             raiseInterrupt(vm: vm)
+        }
+        if didWork {
+            let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1_000_000
+            metrics.renderCount += 1
+            metrics.renderTotalUs += elapsed
         }
     }
 
@@ -629,11 +668,23 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let dataOffset = 16
             guard size >= dataOffset + Int(bpr) * Int(h) else { return }
 
+            let uploadT0 = CFAbsoluteTimeGetCurrent()
             let region = MTLRegion(origin: MTLOrigin(x: Int(x), y: Int(y), z: 0),
                                    size: MTLSize(width: Int(w), height: Int(h), depth: 1))
             tex.replace(region: region, mipmapLevel: 0,
                         withBytes: payload + dataOffset, bytesPerRow: Int(bpr))
+            let uploadElapsed = (CFAbsoluteTimeGetCurrent() - uploadT0) * 1_000_000
+            metrics.uploadCount += 1
+            metrics.uploadTotalUs += uploadElapsed
             if verbose { print("VirtioMetal: upload texture \(handle) (\(w)×\(h))") }
+
+        case .bindHostTexture:
+            guard size >= 8 else { return }
+            let guestId = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
+            let hostHandle = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
+            if let tex = textureRegistry.lookup(hostHandle) {
+                textureRegistry.register(guest: guestId, texture: tex)
+            }
 
         case .destroyObject:
             guard size >= 4 else { return }
@@ -1014,6 +1065,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 break
             }
             let frameId = Int(payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
+            let presentT0 = CFAbsoluteTimeGetCurrent()
             if offscreenDrawable != nil {
                 // Headless: offscreen texture is the render target.
                 if let cb = currentCommandBuffer {
@@ -1084,6 +1136,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 cb.commit()
                 cb.waitUntilCompleted()
             }
+            let presentUs = (CFAbsoluteTimeGetCurrent() - presentT0) * 1_000_000
+            metrics.presentCount += 1
+            metrics.presentTotalUs += presentUs
+            if presentUs > metrics.presentMaxUs { metrics.presentMaxUs = presentUs }
 
             // Process pending cursor readback now that GPU work has completed.
             if let pending = pendingCursorReadback {
@@ -1158,6 +1214,18 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
             onFrame?(frameId)
             presentCount += 1
+
+            // Periodic metrics summary (~1s at 120Hz)
+            if metrics.presentCount >= 120 {
+                let avgUs = metrics.presentCount > 0
+                    ? Int(metrics.presentTotalUs / Double(metrics.presentCount)) : 0
+                print("metal: setup=\(metrics.setupCount)/\(Int(metrics.setupTotalUs))us"
+                      + " render=\(metrics.renderCount)/\(Int(metrics.renderTotalUs))us"
+                      + " present=\(metrics.presentCount)"
+                      + " avg=\(avgUs)us max=\(Int(metrics.presentMaxUs))us"
+                      + " upload=\(metrics.uploadCount)/\(Int(metrics.uploadTotalUs))us")
+                metrics.reset()
+            }
 
             startDisplayLink()
         }

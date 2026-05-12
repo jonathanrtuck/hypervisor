@@ -84,6 +84,10 @@ enum MetalSetupCommand: UInt16 {
     ///          [u32 bytes_per_row] [u8... pixel_data]
     case uploadTexture        = 0x0021
 
+    /// Bind a host-side texture to a guest texture ID.
+    /// Payload: [u32 guest_tex_id] [u32 host_handle]
+    case bindHostTexture      = 0x0022
+
     /// Destroy an object (any type).
     /// Payload: [u32 handle]
     case destroyObject        = 0x00FF

@@ -36,6 +36,28 @@ The guest writes one or more commands into a virtio descriptor chain. The host
 processes all commands in the chain sequentially, then marks the descriptor as
 used.
 
+## Config Space
+
+The Metal device config space exposes display parameters. All fields are
+read-only, little-endian u32.
+
+| Offset | Field        | Description                                         |
+| ------ | ------------ | --------------------------------------------------- |
+| 0x00   | width        | Display width in pixels                             |
+| 0x04   | height       | Display height in pixels                            |
+| 0x08   | refresh_hz   | Host display refresh rate (e.g., 60, 120)           |
+| 0x0C   | scale_factor | Display backing scale factor (1 = 1x, 2 = Retina)   |
+| 0x10   | has_display  | 1 if visible window, 0 if headless (`--background`) |
+
+The guest reads width/height to size its framebuffer and viewport.
+
+### Vsync Notification
+
+The host raises a config change interrupt (`InterruptStatus` bit 1) at the
+display's native refresh rate via `CADisplayLink`. The guest can use this as a
+vsync signal to pace frame submission. In headless mode (`--background`), no
+vsync interrupts are delivered.
+
 ## Command Format
 
 Every command starts with an 8-byte header:
@@ -180,6 +202,23 @@ Payload:
   u32   bytes_per_row      Source row stride in bytes
   u8[]  pixel_data         Raw pixel data (width * height * bpp)
 ```
+
+### `BIND_HOST_TEXTURE` (0x0022)
+
+Bind a host-assigned texture handle to a guest-assigned texture ID. This allows
+the guest to reference host-created textures (e.g., from video decode sessions)
+in Metal render commands using a guest-chosen handle.
+
+```text
+Payload:
+  u32   guest_tex_id     Guest-assigned handle to create/overwrite
+  u32   host_handle      Host-assigned handle (from video decode CREATE_SESSION)
+```
+
+The host looks up the real `MTLTexture` for `host_handle` in the shared
+`TextureRegistry` and registers it under `guest_tex_id`. After binding, the
+guest can use `guest_tex_id` in `SET_FRAGMENT_TEXTURE`, `SET_COMPUTE_TEXTURE`,
+and other texture-referencing commands.
 
 ### `DESTROY_OBJECT` (0x00FF)
 
@@ -642,3 +681,170 @@ fragment float4 fragment_main(VertexOut in [[stage_in]]) {
 { -0.5, -0.5,   0.0, 0.0,   0.0, 1.0, 0.0, 1.0 }  // bottom-left, green
 {  0.5, -0.5,   0.0, 0.0,   0.0, 0.0, 1.0, 1.0 }  // bottom-right, blue
 ```
+
+---
+
+# Video Decode Protocol Specification
+
+The video decode device (device ID 30, custom) provides hardware-accelerated
+video decoding via macOS VideoToolbox. The guest submits compressed video
+frames; the host decodes them and makes decoded BGRA pixels available as Metal
+textures and/or writes them to guest memory.
+
+## Transport
+
+| Queue   | Index | Purpose                                   |
+| ------- | ----- | ----------------------------------------- |
+| Control | 0     | Session management (create/destroy/flush) |
+| Decode  | 1     | Frame submission and decode               |
+
+Features: `VIRTIO_F_VERSION_1` (bit 32).
+
+## Config Space
+
+Read-only, little-endian u32:
+
+| Offset | Field            | Description                          |
+| ------ | ---------------- | ------------------------------------ |
+| 0x00   | supported_codecs | Bitmask of hardware-supported codecs |
+| 0x04   | max_width        | Maximum decode width (8192)          |
+| 0x08   | max_height       | Maximum decode height (8192)         |
+
+### Codec Bitmask
+
+| Bit | Codec |
+| --- | ----- |
+| 0   | MJPEG |
+| 1   | H.264 |
+| 2   | HEVC  |
+| 3   | VP9   |
+| 4   | AV1   |
+
+Bits reflect hardware capability — checked at init via
+`VTIsHardwareDecodeSupported`. MJPEG and H.264 are always available on Apple
+Silicon.
+
+## Control Commands (Queue 0)
+
+The first readable descriptor contains the request. The last writable descriptor
+receives the response. The first `u32` of every request is the command code.
+
+### `CREATE_SESSION` (0x01)
+
+Create a decode session backed by a `VTDecompressionSession`.
+
+```text
+Request (24 bytes):
+  u32   command          = 0x01
+  u32   session_id       Guest-assigned session identifier
+  u8    codec            Codec index (see bitmask table)
+  u8[3] reserved
+  u32   width            Frame width in pixels
+  u32   height           Frame height in pixels
+  u32   codec_data_size  Size of codec-specific data (0 if none)
+```
+
+If `codec_data_size > 0`, a second readable descriptor contains codec-specific
+initialization data:
+
+- **H.264**: NAL length size (u8), parameter set count (u8), 2 bytes reserved,
+  then for each parameter set: u32 size + raw NAL bytes. Minimum 2 sets (SPS +
+  PPS).
+- **HEVC**: Same layout, minimum 3 sets (VPS + SPS + PPS).
+- **Other codecs**: No codec data needed.
+
+```text
+Response (12 bytes):
+  u32   status           Status code
+  u32   texture_handle   Host-assigned Metal texture handle (0x80000000+)
+  u32   reserved
+```
+
+The returned `texture_handle` is registered in the shared `TextureRegistry` and
+can be used in Metal render commands (`SET_FRAGMENT_TEXTURE`, etc.) for
+zero-copy compositing. The texture is updated with each decoded frame via
+IOSurface backing.
+
+### `DESTROY_SESSION` (0x02)
+
+Destroy a session and release its texture handle.
+
+```text
+Request (8 bytes):
+  u32   command          = 0x02
+  u32   session_id
+
+Response (4 bytes):
+  u32   status
+```
+
+### `FLUSH_SESSION` (0x03)
+
+Flush the decoder (invalidate and recreate the internal VT session). Use after
+seeking or when the compressed stream is discontinuous.
+
+```text
+Request (8 bytes):
+  u32   command          = 0x03
+  u32   session_id
+
+Response (4 bytes):
+  u32   status
+```
+
+## Decode Commands (Queue 1)
+
+Each descriptor chain decodes one compressed frame. Four descriptors:
+
+```text
+Descriptor 0 — Frame header (readable, 24 bytes):
+  u32   session_id
+  u32   flags            Reserved (must be 0)
+  u32   compressed_size  Size of compressed data in bytes
+  u32   reserved
+  u64   timestamp_ns     Presentation timestamp in nanoseconds
+
+Descriptor 1 — Compressed data (readable):
+  u8[]  data             Raw compressed frame (compressed_size bytes)
+
+Descriptor 2 — Pixel output (writable, optional):
+  u8[]  pixels           Decoded BGRA pixels (width * height * 4 bytes)
+                         Omit this descriptor for texture-only decode
+
+Descriptor 3 — Status (writable, 24 bytes):
+  u32   status           Status code
+  u32   bytes_written    Bytes written to pixel output (0 if no pixel descriptor)
+  u64   timestamp_ns     Echo of input timestamp
+  u64   duration_ns      Reserved (currently 0)
+```
+
+If the pixel output descriptor is present, the host copies decoded BGRA pixels
+into guest memory. If omitted, decoded frames are only available via the
+session's Metal texture handle (zero-copy path via IOSurface).
+
+## Texture Integration
+
+Decoded frames use IOSurface-backed `CVPixelBuffer` output from VideoToolbox.
+The host creates an `MTLTexture` from the IOSurface and updates the session's
+texture handle in the shared `TextureRegistry`. This allows the guest to
+reference decoded video frames in Metal render commands without any CPU-side
+pixel copy.
+
+Handle ranges:
+
+- `0x00000001 – 0x7FFFFFFF`: guest-assigned (Metal `CREATE_TEXTURE`)
+- `0x80000000 – 0xFFFFFFFE`: host-assigned (video decode sessions)
+- `0x00000000`: invalid
+- `0xFFFFFFFF`: `DRAWABLE_HANDLE` (reserved)
+
+## Status Codes
+
+| Code   | Name                | Description                  |
+| ------ | ------------------- | ---------------------------- |
+| 0x0000 | OK                  | Success                      |
+| 0x0001 | ERR_INVALID_SESSION | Session ID not found         |
+| 0x0002 | ERR_UNSUPPORTED     | Codec not supported          |
+| 0x0003 | ERR_DECODE_FAILED   | VideoToolbox decode error    |
+| 0x0004 | ERR_BAD_DATA        | Malformed compressed data    |
+| 0x0005 | ERR_NO_MEMORY       | Failed to allocate resources |
+| 0x0006 | ERR_BAD_REQUEST     | Invalid request format       |

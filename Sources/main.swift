@@ -63,7 +63,7 @@ func printUsage() {
     print("  --no-gpu             Boot without GPU (serial only, no window)")
     print("  --windowed           Run in a window instead of fullscreen")
     print("  --background         No visible window, no focus steal (for automated captures)")
-    print("  --ram SIZE           RAM size in MiB (default: 256)")
+    print("  --ram SIZE           RAM size in MiB (default: 512)")
     print("  --cpus N             Number of vCPUs (default: 4)")
     print("  --share DIR          9P shared directory (auto-detected if omitted)")
     print("  --drive PATH         Disk image for virtio-blk (raw format)")
@@ -95,7 +95,7 @@ func parseArgs() -> Config {
     var noGpu = false
     var windowed = false
     var background = false
-    var ramMiB = 256
+    var ramMiB = 512
     var cpuCount = 4
     var shareDir: String?
     var drivePath: String?
@@ -438,7 +438,11 @@ func main() throws {
         // Frame numbers in the schedule are guest frame_ids.
         let schedule: EventSchedule
         if let eventsPath = config.eventsFile {
-            guard let actions = loadEventScript(path: eventsPath) else { exit(1) }
+            guard let actions = loadEventScript(
+                path: eventsPath,
+                displayWidth: Float(backend.displayWidth),
+                displayHeight: Float(backend.displayHeight)
+            ) else { exit(1) }
             schedule = EventSchedule.build(actions: actions)
             print("  Events: \(eventsPath) (\(actions.count) actions, through frame \(schedule.maxFrame))")
 

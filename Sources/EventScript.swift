@@ -251,7 +251,17 @@ enum ScriptAction {
 ///     15 click 100 200
 ///     20 capture /tmp/test.png
 ///     25 exit
-func parseEventScript(_ text: String) -> [(frameId: Int, action: ScriptAction)] {
+/// Parse a coordinate string — either a pixel value ("720") or a percentage ("50%")
+/// resolved against the given dimension.
+private func parseCoord(_ s: Substring, dimension: Float) -> Float? {
+    if s.hasSuffix("%") {
+        guard let pct = Float(s.dropLast()) else { return nil }
+        return pct / 100.0 * dimension
+    }
+    return Float(s)
+}
+
+func parseEventScript(_ text: String, displayWidth: Float = 0, displayHeight: Float = 0) -> [(frameId: Int, action: ScriptAction)] {
     var actions: [(frameId: Int, action: ScriptAction)] = []
 
     for (lineNum, rawLine) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
@@ -279,24 +289,32 @@ func parseEventScript(_ text: String) -> [(frameId: Int, action: ScriptAction)] 
             }
         case "move":
             let coords = argStr.split(separator: " ")
-            if coords.count >= 2, let x = Float(coords[0]), let y = Float(coords[1]) {
+            if coords.count >= 2,
+               let x = parseCoord(coords[0], dimension: displayWidth),
+               let y = parseCoord(coords[1], dimension: displayHeight) {
                 actions.append((frameId, .move(x, y)))
             }
         case "click":
             let coords = argStr.split(separator: " ")
-            if coords.count >= 2, let x = Float(coords[0]), let y = Float(coords[1]) {
+            if coords.count >= 2,
+               let x = parseCoord(coords[0], dimension: displayWidth),
+               let y = parseCoord(coords[1], dimension: displayHeight) {
                 actions.append((frameId, .click(x, y)))
             }
         case "dblclick":
             let coords = argStr.split(separator: " ")
-            if coords.count >= 2, let x = Float(coords[0]), let y = Float(coords[1]) {
+            if coords.count >= 2,
+               let x = parseCoord(coords[0], dimension: displayWidth),
+               let y = parseCoord(coords[1], dimension: displayHeight) {
                 actions.append((frameId, .dblclick(x, y)))
             }
         case "drag":
             let coords = argStr.split(separator: " ")
             if coords.count >= 4,
-               let x1 = Float(coords[0]), let y1 = Float(coords[1]),
-               let x2 = Float(coords[2]), let y2 = Float(coords[3]) {
+               let x1 = parseCoord(coords[0], dimension: displayWidth),
+               let y1 = parseCoord(coords[1], dimension: displayHeight),
+               let x2 = parseCoord(coords[2], dimension: displayWidth),
+               let y2 = parseCoord(coords[3], dimension: displayHeight) {
                 let steps = coords.count >= 5 ? (Int(coords[4]) ?? 10) : 10
                 actions.append((frameId, .drag(x1, y1, x2, y2, steps)))
             }
@@ -316,10 +334,10 @@ func parseEventScript(_ text: String) -> [(frameId: Int, action: ScriptAction)] 
 }
 
 /// Load and parse an event script from a file path.
-func loadEventScript(path: String) -> [(frameId: Int, action: ScriptAction)]? {
+func loadEventScript(path: String, displayWidth: Float = 0, displayHeight: Float = 0) -> [(frameId: Int, action: ScriptAction)]? {
     guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
         print("Error: cannot read event script '\(path)'")
         return nil
     }
-    return parseEventScript(text)
+    return parseEventScript(text, displayWidth: displayWidth, displayHeight: displayHeight)
 }

@@ -32,7 +32,8 @@ The same GPU API on both sides.
   CPU_ON
 - **Hardware GIC** — Apple Silicons native GICv3, not software emulation
 - **Virtio devices** — 9P filesystem, keyboard (with modifier/Caps Lock
-  forwarding), tablet (absolute pointer), Metal GPU
+  forwarding), tablet (absolute pointer), Metal GPU, block device, audio
+  (CoreAudio), networking (vmnet), RNG, video decode (VideoToolbox)
 - **Crash reporting** — automatic crash report on kernel panic via
   [pvpanic](https://www.qemu.org/docs/master/specs/pvpanic.html) device.
   Captures vCPU registers, system registers, and full serial log to
@@ -55,6 +56,18 @@ The same GPU API on both sides.
   producing frames
 - **Block device** — `--drive path.img` attaches a raw disk image as a
   virtio-blk device
+- **Audio** — `--audio` enables audio I/O (virtio-snd backed by CoreAudio).
+  `--audio-dump PATH` writes received PCM to WAV for debugging
+- **Networking** — `--net` enables networking (virtio-net backed by vmnet NAT)
+- **Entropy** — virtio-rng provides random bytes via `SecRandomCopyBytes`
+  (always present)
+- **Video decode** — `--video-decode` enables hardware video decoding via
+  VideoToolbox (MJPEG, H.264, HEVC, VP9, AV1). Decoded frames available as Metal
+  textures for zero-copy compositing
+- **Module loading** — `--module PATH` loads a flat binary at the top of guest
+  RAM. DTB advertises placement via `module-start` / `module-end`
+- **HVF timing** — per-vCPU guest/host timing counters exposed to guest via
+  shared memory page, with exit classification by type
 - **ELF loader** — loads standard ELF64 binaries, handles VA→PA entry point
   resolution
 - **Device tree** — generates FDT with memory, UART, GIC, PSCI, CPU, and virtio
@@ -113,14 +126,19 @@ Options:
   --verbose            Enable verbose logging
   --no-gpu             Boot without GPU (serial only, no window)
   --windowed           Run in a window instead of fullscreen
-  --background         Headless rendering (offscreen texture, no window, no focus steal)
-  --ram SIZE           RAM size in MiB (default: 256)
+  --background         No visible window, no focus steal (for automated captures)
+  --ram SIZE           RAM size in MiB (default: 512)
   --cpus N             Number of vCPUs (default: 4)
   --share DIR          9P shared directory (auto-detected if omitted)
   --drive PATH         Disk image for virtio-blk (raw format)
-  --capture N PATH     Capture frame with frame_id N as PNG, then exit
-  --capture N,M,.. PFX Capture multiple frame_ids as PFX-NNN.png, exit after last
+  --module PATH        Flat binary to load into guest RAM (entry at offset 0)
+  --capture N PATH     Capture frame_id N as PNG to PATH, then exit
+  --capture N,M,.. PFX Capture multiple frame_ids as PFX-NNN.png
   --events FILE        Run event script (evdev input injection + captures)
+  --audio              Enable audio output/input (virtio-snd)
+  --audio-dump PATH    Dump received PCM to WAV file (requires --audio)
+  --net                Enable networking (virtio-net, vmnet NAT)
+  --video-decode       Enable hardware video decode (virtio-video, VideoToolbox)
   --resolution WxH     Fixed pixel resolution (e.g., 800x600)
   --timeout SECS       Exit with code 2 if not done within SECS seconds
 
@@ -173,6 +191,21 @@ SCRIPT
 # Boot with a disk image (virtio-blk)
 .build/debug/hypervisor kernel.elf --drive rootfs.img
 
+# Load a flat binary module into guest RAM
+.build/debug/hypervisor kernel.elf --module userspace.bin
+
+# Enable audio output/input
+.build/debug/hypervisor kernel.elf --audio
+
+# Enable audio with PCM dump to WAV file for debugging
+.build/debug/hypervisor kernel.elf --audio --audio-dump /tmp/audio.wav
+
+# Enable networking (vmnet NAT)
+.build/debug/hypervisor kernel.elf --net
+
+# Enable hardware video decode (VideoToolbox)
+.build/debug/hypervisor kernel.elf --video-decode
+
 # Capture frame_id 0 with a 30-second timeout (exit 2 if kernel hangs)
 .build/debug/hypervisor kernel.elf --capture 0 /tmp/out.png --timeout 30
 ```
@@ -212,50 +245,57 @@ actions within a multi-frame command's range.
 ## architecture
 
 ```text
-┌─────────────────────────────────────────────────────┐
-│  macOS Host                                         │
-│                                                     │
-│  ┌─────────┐  ┌───────────┐  ┌───────────────────┐  │
-│  │ AppKit  │  │ Hyperv.   │  │ Metal             │  │
-│  │ Window  │  │ framework │  │ (GPU passthrough) │  │
-│  └────┬────┘  └────┬──────┘  └────────┬──────────┘  │
-│       │            │                  │             │
-│  ┌────┴────────────┴──────────────────┴──────────┐  │
-│  │              Hypervisor App                   │  │
-│  │                                               │  │
-│  │  VirtioInput  Virtio9P  VirtioMetal  PL011    │  │
-│  │  (keyboard)   (files)   (GPU cmds)   (UART)   │  │
-│  └──────────────────┬────────────────────────────┘  │
-│                     │ virtio MMIO                   │
-│  ┌──────────────────┴────────────────────────────┐  │
-│  │              Guest ARM64 VM                   │  │
-│  │                                               │  │
-│  │  Your kernel (ELF64)                          │  │
-│  │  Your GPU driver (speaks Metal protocol)      │  │
-│  └───────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│  macOS Host                                            │
+│                                                        │
+│  ┌─────────┐  ┌───────────┐  ┌───────────────────┐     │
+│  │ AppKit  │  │ Hyperv.   │  │ Metal             │     │
+│  │ Window  │  │ framework │  │ (GPU passthrough) │     │
+│  └────┬────┘  └────┬──────┘  └────────┬──────────┘     │
+│       │            │                  │                │
+│  ┌────┴────────────┴──────────────────┴─────────────┐  │
+│  │                 Hypervisor App                   │  │
+│  │                                                  │  │
+│  │  VirtioInput   Virtio9P      VirtioMetal   PL011 │  │
+│  │  VirtioBlock   VirtioSound   VirtioNet           │  │
+│  │  VirtioRng     VirtioVideoDecode                 │  │
+│  └──────────────────┬───────────────────────────────┘  │
+│                     │ virtio MMIO                      │
+│  ┌──────────────────┴────────────────────────────┐     │
+│  │              Guest ARM64 VM                   │     │
+│  │                                               │     │
+│  │  Your kernel (ELF64)                          │     │
+│  │  Your GPU driver (speaks Metal protocol)      │     │
+│  └───────────────────────────────────────────────┘     │
+└────────────────────────────────────────────────────────┘
 ```
 
 ### Source Files
 
-| File                    | Purpose                                                  |
-| ----------------------- | -------------------------------------------------------- |
-| `main.swift`            | Entry point, CLI parsing, device registration, threading |
-| `VirtualMachine.swift`  | VM creation, guest memory, ELF loader, GIC setup         |
-| `VCPU.swift`            | vCPU execution loop, MMIO dispatch, PSCI, timer, PMU     |
-| `DTB.swift`             | Flattened Device Tree generator                          |
-| `PL011.swift`           | PL011 UART emulation (serial output + log buffer)        |
-| `PVPanic.swift`         | pvpanic device (QEMU pvpanic-mmio spec)                  |
-| `CrashReport.swift`     | Crash report generator (register dump + serial log)      |
-| `VirtioMMIO.swift`      | Virtio MMIO transport layer                              |
-| `VirtqueueHelper.swift` | Virtqueue descriptor chain helpers                       |
-| `Virtio9P.swift`        | 9P2000.L filesystem passthrough                          |
-| `VirtioInput.swift`     | Keyboard and tablet input devices                        |
-| `VirtioMetal.swift`     | Metal command passthrough (deserialize + replay)         |
-| `VirtioBlock.swift`     | File-backed block device (virtio-blk)                    |
-| `MetalProtocol.swift`   | Metal command wire format definitions                    |
-| `EventScript.swift`     | Event script parser + scheduler (evdev key names)        |
-| `AppWindow.swift`       | NSWindow + CAMetalLayer + macOS input forwarding         |
+| File                      | Purpose                                                      |
+| ------------------------- | ------------------------------------------------------------ |
+| `main.swift`              | Entry point, CLI parsing, device registration, threading     |
+| `VirtualMachine.swift`    | VM creation, guest memory, ELF loader, GIC setup             |
+| `VCPU.swift`              | vCPU execution loop, MMIO dispatch, PSCI, timer, PMU         |
+| `DTB.swift`               | Flattened Device Tree generator                              |
+| `PL011.swift`             | PL011 UART emulation (serial output + log buffer)            |
+| `PVPanic.swift`           | pvpanic device (QEMU pvpanic-mmio spec)                      |
+| `CrashReport.swift`       | Crash report generator (register dump + serial log)          |
+| `VirtioMMIO.swift`        | Virtio MMIO transport layer                                  |
+| `VirtqueueHelper.swift`   | Virtqueue descriptor chain helpers                           |
+| `Virtio9P.swift`          | 9P2000.L filesystem passthrough                              |
+| `VirtioInput.swift`       | Keyboard and tablet input devices                            |
+| `VirtioMetal.swift`       | Metal command passthrough (deserialize + replay)             |
+| `VirtioBlock.swift`       | File-backed block device (virtio-blk)                        |
+| `VirtioSound.swift`       | Audio I/O via CoreAudio AudioUnit (virtio-snd)               |
+| `VirtioNet.swift`         | Networking via vmnet.framework (virtio-net)                  |
+| `VirtioRng.swift`         | Entropy source via SecRandomCopyBytes (virtio-rng)           |
+| `VirtioVideoDecode.swift` | Hardware video decode via VideoToolbox (custom device ID 30) |
+| `MetalProtocol.swift`     | Metal command wire format definitions                        |
+| `EventScript.swift`       | Event script parser + scheduler (evdev key names)            |
+| `HVFTiming.swift`         | Per-vCPU timing counters for guest perf instrumentation      |
+| `TextureRegistry.swift`   | Shared texture handle table for Metal + video decode         |
+| `AppWindow.swift`         | NSWindow + CAMetalLayer + macOS input forwarding             |
 
 ### Threading Model
 
@@ -270,7 +310,7 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 
 | Resource | Details                                                               |
 | -------- | --------------------------------------------------------------------- |
-| RAM      | Configurable, default 256 MiB at PA `0x40000000`                      |
+| RAM      | Configurable, default 512 MiB at PA `0x40000000`                      |
 | UART     | PL011 at `0x09000000` (serial I/O)                                    |
 | RTC      | PL031 at `0x09010000` (wall-clock time from host)                     |
 | pvpanic  | At `0x09020000` — write `0x01` to signal kernel panic to hypervisor   |
@@ -282,13 +322,17 @@ Your kernel boots into a standard ARM64 `virt`-like environment:
 
 ### Virtio Device Slots
 
-| Slot | Device       | IRQ (SPI) | Device ID | Description                             |
-| ---- | ------------ | --------- | --------- | --------------------------------------- |
-| 0    | virtio-9p    | 48        | 9         | Host filesystem (if `--share` provided) |
-| 1    | virtio-input | 49        | 18        | Keyboard (evdev)                        |
-| 2    | virtio-input | 50        | 18        | Tablet / absolute pointer               |
-| 3    | virtio-metal | 51        | 22        | Metal GPU command passthrough           |
-| 4    | virtio-blk   | 52        | 2         | Block device (if `--drive` provided)    |
+| Slot | Device              | IRQ (SPI) | Device ID | Description                                 |
+| ---- | ------------------- | --------- | --------- | ------------------------------------------- |
+| 0    | virtio-9p           | 48        | 9         | Host filesystem (if `--share` provided)     |
+| 1    | virtio-input        | 49        | 18        | Keyboard (evdev)                            |
+| 2    | virtio-input        | 50        | 18        | Tablet / absolute pointer                   |
+| 3    | virtio-metal        | 51        | 22        | Metal GPU command passthrough               |
+| 4    | virtio-blk          | 52        | 2         | Block device (if `--drive` provided)        |
+| 5    | virtio-snd          | 53        | 25        | Audio I/O (if `--audio` provided)           |
+| 6    | virtio-net          | 54        | 1         | Networking (if `--net` provided)            |
+| 7    | virtio-rng          | 55        | 4         | Entropy source (always present)             |
+| 8    | virtio-video-decode | 56        | 30        | Video decode (if `--video-decode` provided) |
 
 ## virtio device architecture
 
@@ -296,49 +340,32 @@ Each virtio backend maps one virtio device to one Apple framework. The guest
 always sees standard virtio; the host always sees native macOS APIs. No
 translation layers in between.
 
-| Backend       | Virtio Device    | Apple Framework | Guest Sees           | Host Uses                 |
-| ------------- | ---------------- | --------------- | -------------------- | ------------------------- |
-| `Virtio9P`    | 9P filesystem    | Foundation (FS) | 9P2000.L protocol    | macOS file I/O            |
-| `VirtioInput` | Input (keyboard) | AppKit          | evdev key events     | NSEvent key events        |
-| `VirtioInput` | Input (tablet)   | AppKit          | evdev abs events     | NSEvent mouse tracking    |
-| `VirtioMetal` | GPU (device 22)  | Metal           | Metal command stream | MTLDevice/MTLCommandQueue |
-| `VirtioBlock` | Block (device 2) | Foundation (FS) | virtio-blk protocol  | File-backed read/write    |
+| Backend             | Virtio Device         | Apple Framework | Guest Sees           | Host Uses                 |
+| ------------------- | --------------------- | --------------- | -------------------- | ------------------------- |
+| `Virtio9P`          | 9P filesystem         | Foundation (FS) | 9P2000.L protocol    | macOS file I/O            |
+| `VirtioInput`       | Input (keyboard)      | AppKit          | evdev key events     | NSEvent key events        |
+| `VirtioInput`       | Input (tablet)        | AppKit          | evdev abs events     | NSEvent mouse tracking    |
+| `VirtioMetal`       | GPU (device 22)       | Metal           | Metal command stream | MTLDevice/MTLCommandQueue |
+| `VirtioBlock`       | Block (device 2)      | Foundation (FS) | virtio-blk protocol  | File-backed read/write    |
+| `VirtioSound`       | Sound (device 25)     | AudioToolbox    | virtio-snd protocol  | CoreAudio AudioUnit       |
+| `VirtioNet`         | Net (device 1)        | vmnet           | virtio-net protocol  | vmnet NAT interface       |
+| `VirtioRng`         | RNG (device 4)        | Security        | virtio-rng protocol  | SecRandomCopyBytes        |
+| `VirtioVideoDecode` | Video decode (dev 30) | VideoToolbox    | custom decode cmds   | VTDecompressionSession    |
 
 This pattern is the organizing principle for all backends, current and future.
 Adding a new backend means: pick a virtio device type (standard or custom),
 write a Swift class that translates between virtio virtqueues and the
 corresponding Apple framework, register it at a slot in `main.swift`.
 
-### Planned Backends
-
-These are not yet implemented. Slot assignments and details may change.
-
-**virtio-sound** (device ID 25) — Audio playback and capture via CoreAudio. Two
-virtqueues: TX for playback, RX for capture. The guest negotiates PCM stream
-parameters (sample rate, channels, format) via virtio-sound’s standard config
-space. The host backend creates a CoreAudio audio unit and bridges PCM buffers.
-Needed for audio/video content types.
-
-**Networking** — Options include:
-
-- _virtio-net_ (device ID 1): Standard NIC. The guest needs a TCP/IP stack. The
-  host bridges via `Network.framework` (userspace packet injection) or a `utun`
-  device.
-- _HTTP bridge_ (custom device): A higher-level alternative that exposes HTTP
-  request/response and WebSocket semantics directly over virtio. The guest sends
-  structured HTTP requests; the host executes them via `URLSession`. Avoids the
-  guest needing a full TCP/IP stack at the cost of not supporting arbitrary
-  protocols.
+### Future Backends
 
 **Clipboard bridge** — Copy/paste between host and guest. Either a custom virtio
 device or an extension of virtio-input. The host side reads and writes
-`NSPasteboard`. The guest side exposes a simple get/put interface for the OS
-clipboard abstraction.
+`NSPasteboard`.
 
 **File drag-drop** — Drag files between host Finder and guest window. Could
-extend virtio-9p (the file is already accessible via the shared directory) or
-use a custom device that sends file metadata + path on drop events. The host
-side hooks `NSDraggingDestination` / `NSDraggingSource` on the AppKit window.
+extend virtio-9p or use a custom device that sends file metadata + path on drop
+events.
 
 ## metal GPU protocol
 
@@ -398,6 +425,13 @@ Only Apple system frameworks — no external dependencies:
 - **Metal.framework** — GPU API
 - **AppKit.framework** — windowing
 - **QuartzCore.framework** — CAMetalLayer
+- **Security.framework** — SecRandomCopyBytes (virtio-rng)
+- **AudioToolbox.framework** — AudioUnit (virtio-snd)
+- **CoreAudio.framework** — audio device configuration
+- **VideoToolbox.framework** — VTDecompressionSession (video decode)
+- **CoreMedia.framework** — CMSampleBuffer / CMFormatDescription
+- **CoreVideo.framework** — CVPixelBuffer / IOSurface interop
+- **vmnet.framework** — VM networking (virtio-net, weak-linked)
 
 ## license
 

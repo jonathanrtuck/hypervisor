@@ -12,6 +12,8 @@ make run KERNEL=path/to/kernel.elf          # sign + run
 make run KERNEL=path/to/kernel.elf ARGS="--windowed --verbose"
 make run KERNEL=path/to/kernel.elf ARGS="--background --capture 0 /tmp/out.png"  # headless capture
 make run KERNEL=path/to/kernel.elf ARGS="--module path/to/user.bin"              # load flat binary module
+make run KERNEL=path/to/kernel.elf ARGS="--audio --net"                          # audio + networking
+make run KERNEL=path/to/kernel.elf ARGS="--video-decode"                         # hardware video decode
 make run-verbose KERNEL=path/to/kernel.elf  # with --verbose
 make run-serial KERNEL=path/to/kernel.elf   # --no-gpu (no window)
 make clean          # swift package clean
@@ -49,8 +51,9 @@ If the kernel needs rebuilding:
 ## Architecture
 
 This is a native macOS ARM64 hypervisor built on Apple's Hypervisor.framework
-with Metal GPU passthrough. ~6000 lines of Swift, no external dependencies —
-only Apple system frameworks (Hypervisor, Metal, AppKit, QuartzCore).
+with Metal GPU passthrough. ~8500 lines of Swift, no external dependencies —
+only Apple system frameworks (Hypervisor, Metal, AppKit, QuartzCore, Security,
+AudioToolbox, CoreAudio, VideoToolbox, CoreMedia, CoreVideo, vmnet).
 
 ### Threading Model
 
@@ -82,15 +85,16 @@ In `--no-gpu` mode, the VM runs directly on the main thread (no NSApplication).
 
 **Device backends** — each maps a virtio device to a native Apple framework:
 
-| Backend              | File                | Virtio Device ID | Apple Framework  |
-| -------------------- | ------------------- | ---------------- | ---------------- |
-| `Virtio9PBackend`    | `Virtio9P.swift`    | 9                | Foundation (FS)  |
-| `VirtioInputBackend` | `VirtioInput.swift` | 18               | AppKit (NSEvent) |
-| `VirtioMetalBackend` | `VirtioMetal.swift` | 22 (custom)      | Metal            |
-| `VirtioBlockBackend` | `VirtioBlock.swift` | 2                | Foundation (FS)  |
-| `VirtioSoundBackend` | `VirtioSound.swift` | 25               | AudioToolbox     |
-| `VirtioNetBackend`   | `VirtioNet.swift`   | 1                | vmnet            |
-| `VirtioRngBackend`   | `VirtioRng.swift`   | 4                | Security         |
+| Backend                    | File                      | Virtio Device ID | Apple Framework  |
+| -------------------------- | ------------------------- | ---------------- | ---------------- |
+| `Virtio9PBackend`          | `Virtio9P.swift`          | 9                | Foundation (FS)  |
+| `VirtioInputBackend`       | `VirtioInput.swift`       | 18               | AppKit (NSEvent) |
+| `VirtioMetalBackend`       | `VirtioMetal.swift`       | 22 (custom)      | Metal            |
+| `VirtioBlockBackend`       | `VirtioBlock.swift`       | 2                | Foundation (FS)  |
+| `VirtioSoundBackend`       | `VirtioSound.swift`       | 25               | AudioToolbox     |
+| `VirtioNetBackend`         | `VirtioNet.swift`         | 1                | vmnet            |
+| `VirtioRngBackend`         | `VirtioRng.swift`         | 4                | Security         |
+| `VirtioVideoDecodeBackend` | `VirtioVideoDecode.swift` | 30 (custom)      | VideoToolbox     |
 
 **Display** (`AppWindow.swift`): NSWindow + CAMetalLayer + macOS input
 forwarding (interactive mode only). Converts NSEvent keyboard/mouse events into
@@ -100,7 +104,9 @@ rendering via offscreen MTLTexture).
 **Support**: `DTB.swift` (flattened device tree generator), `PL011.swift`
 (UART + log buffer), `PVPanic.swift` (pvpanic-mmio device), `CrashReport.swift`
 (crash report writer), `MetalProtocol.swift` (GPU command wire format enums),
-`EventScript.swift` (automated input injection for testing).
+`EventScript.swift` (automated input injection for testing), `HVFTiming.swift`
+(per-vCPU timing counters for guest perf instrumentation),
+`TextureRegistry.swift` (shared texture handle table for Metal + video decode).
 
 **Crash reporting**: On kernel panic, the guest writes `0x01` to the pvpanic
 MMIO register at `0x0902_0000` (QEMU pvpanic-mmio spec). The hypervisor captures
