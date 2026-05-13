@@ -483,6 +483,48 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
         return 8
     }
 
+    private struct AACDecodeContext {
+        var dataPtr: UnsafeMutableRawPointer
+        var packetDescs: UnsafeMutablePointer<AudioStreamPacketDescription>
+        var currentPacket: Int
+        var totalPackets: Int
+        var oneDesc: AudioStreamPacketDescription
+    }
+
+    private static let aacInputProc: AudioConverterComplexInputDataProc = {
+        (_, ioNumberDataPackets, ioData, outDataPacketDescription, inUserData) in
+
+        let ctx = inUserData!.assumingMemoryBound(to: AACDecodeContext.self)
+
+        guard ctx.pointee.currentPacket < ctx.pointee.totalPackets else {
+            ioNumberDataPackets.pointee = 0
+            return noErr
+        }
+
+        let pkt = ctx.pointee.currentPacket
+        let desc = ctx.pointee.packetDescs[pkt]
+
+        ioNumberDataPackets.pointee = 1
+        ioData.pointee.mBuffers.mData = ctx.pointee.dataPtr.advanced(by: Int(desc.mStartOffset))
+        ioData.pointee.mBuffers.mDataByteSize = desc.mDataByteSize
+        ioData.pointee.mBuffers.mNumberChannels = 0
+
+        if let outDesc = outDataPacketDescription {
+            ctx.pointee.oneDesc = AudioStreamPacketDescription(
+                mStartOffset: 0,
+                mVariableFramesInPacket: 0,
+                mDataByteSize: desc.mDataByteSize
+            )
+            let base = UnsafeMutableRawPointer(ctx)
+            let offset = MemoryLayout<AACDecodeContext>.offset(of: \AACDecodeContext.oneDesc)!
+            outDesc.pointee = base.advanced(by: offset)
+                .assumingMemoryBound(to: AudioStreamPacketDescription.self)
+        }
+
+        ctx.pointee.currentPacket += 1
+        return noErr
+    }
+
     private func decodeAACToPCM(
         configPtr: UnsafeMutableRawPointer, configSize: Int,
         sizesPtr: UnsafeMutableRawPointer, numFrames: Int,
@@ -490,52 +532,36 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
         sampleRate: Double, channels: UInt32,
         outputPtr: UnsafeMutableRawPointer, outputMaxBytes: Int
     ) -> Int {
-        // Parse AudioSpecificConfig from the ESDS to get profile/freq/channels
-        // for ADTS header construction.
-        let (ascProfile, ascFreqIdx, ascChannels) = parseASC(
-            configPtr: configPtr, configSize: configSize)
-
-        // Build ADTS stream: 7-byte header per frame + raw AAC data
-        var adtsData = Data()
-        var offset = 0
-        for i in 0..<numFrames {
-            let frameSize = Int(sizesPtr.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self))
-            let adtsFrameLen = frameSize + 7
-
-            var hdr = [UInt8](repeating: 0, count: 7)
-            hdr[0] = 0xFF
-            hdr[1] = 0xF1
-            hdr[2] = ((ascProfile - 1) << 6) | (ascFreqIdx << 2) | (ascChannels >> 2)
-            hdr[3] = ((ascChannels & 3) << 6) | UInt8((adtsFrameLen >> 11) & 3)
-            hdr[4] = UInt8((adtsFrameLen >> 3) & 0xFF)
-            hdr[5] = UInt8((adtsFrameLen & 7) << 5) | 0x1F
-            hdr[6] = 0xFC
-
-            adtsData.append(contentsOf: hdr)
-            adtsData.append(Data(bytes: compressedPtr.advanced(by: offset), count: frameSize))
-            offset += frameSize
-        }
-
-        // Write to temp file
-        let tmpPath = "/tmp/_vdec_audio_\(ProcessInfo.processInfo.processIdentifier).aac"
-        let tmpURL = URL(fileURLWithPath: tmpPath)
-        do { try adtsData.write(to: tmpURL) } catch {
-            print("VirtioVideoDecode: failed to write temp AAC: \(error)")
+        guard let ascBytes = extractASCFromESDS(configPtr: configPtr, configSize: configSize),
+              ascBytes.count >= 2 else {
             return 0
         }
-        defer { try? FileManager.default.removeItem(at: tmpURL) }
 
-        // Open with ExtAudioFile and read as F32 interleaved stereo
-        var extFile: ExtAudioFileRef?
-        var status = ExtAudioFileOpenURL(tmpURL as CFURL, &extFile)
-        guard status == noErr, let extFile else {
-            print("VirtioVideoDecode: ExtAudioFileOpenURL failed: \(status)")
-            return 0
-        }
-        defer { ExtAudioFileDispose(extFile) }
+        let bits = (UInt16(ascBytes[0]) << 8) | UInt16(ascBytes[1])
+        let freqIdx = Int((bits >> 7) & 0xF)
+        let chanCfg = Int((bits >> 3) & 0xF)
+
+        let sampleRates: [Double] = [
+            96000, 88200, 64000, 48000, 44100, 32000,
+            24000, 22050, 16000, 12000, 11025, 8000, 7350,
+        ]
+        let inputRate = freqIdx < sampleRates.count ? sampleRates[freqIdx] : sampleRate
+        let inputChannels = chanCfg > 0 ? UInt32(chanCfg) : channels
+
+        var inputFormat = AudioStreamBasicDescription(
+            mSampleRate: inputRate,
+            mFormatID: kAudioFormatMPEG4AAC,
+            mFormatFlags: 0,
+            mBytesPerPacket: 0,
+            mFramesPerPacket: 1024,
+            mBytesPerFrame: 0,
+            mChannelsPerFrame: inputChannels,
+            mBitsPerChannel: 0,
+            mReserved: 0
+        )
 
         let outChannels: UInt32 = 2
-        var clientFormat = AudioStreamBasicDescription(
+        var outputFormat = AudioStreamBasicDescription(
             mSampleRate: 48000,
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
@@ -547,74 +573,106 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
             mReserved: 0
         )
 
-        status = ExtAudioFileSetProperty(
-            extFile, kExtAudioFileProperty_ClientDataFormat,
-            UInt32(MemoryLayout<AudioStreamBasicDescription>.size), &clientFormat)
-        guard status == noErr else {
-            print("VirtioVideoDecode: set client format failed: \(status)")
+        var converter: AudioConverterRef?
+        var status = AudioConverterNew(&inputFormat, &outputFormat, &converter)
+        guard status == noErr, let converter else {
+            print("VirtioVideoDecode: AudioConverterNew failed: \(status)")
             return 0
         }
+        defer { AudioConverterDispose(converter) }
+
+        ascBytes.withUnsafeBytes { ptr in
+            let _ = AudioConverterSetProperty(
+                converter, kAudioConverterDecompressionMagicCookie,
+                UInt32(ascBytes.count), ptr.baseAddress!)
+        }
+
+        let descBuf = UnsafeMutableBufferPointer<AudioStreamPacketDescription>
+            .allocate(capacity: numFrames)
+        defer { descBuf.deallocate() }
+
+        var dataOffset: Int64 = 0
+        for i in 0..<numFrames {
+            let size = Int(sizesPtr.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self))
+            descBuf[i] = AudioStreamPacketDescription(
+                mStartOffset: dataOffset,
+                mVariableFramesInPacket: 0,
+                mDataByteSize: UInt32(size)
+            )
+            dataOffset += Int64(size)
+        }
+
+        var context = AACDecodeContext(
+            dataPtr: compressedPtr,
+            packetDescs: descBuf.baseAddress!,
+            currentPacket: 0,
+            totalPackets: numFrames,
+            oneDesc: AudioStreamPacketDescription()
+        )
 
         var totalBytesWritten = 0
-        let framesPerRead: UInt32 = 4096
+        let framesPerBuffer: UInt32 = 4096
 
         while totalBytesWritten < outputMaxBytes {
-            var bufferList = AudioBufferList(
+            var outputFrames = framesPerBuffer
+            var outputBuffer = AudioBufferList(
                 mNumberBuffers: 1,
                 mBuffers: AudioBuffer(
                     mNumberChannels: outChannels,
-                    mDataByteSize: framesPerRead * outChannels * 4,
+                    mDataByteSize: framesPerBuffer * outChannels * 4,
                     mData: outputPtr.advanced(by: totalBytesWritten)
                 )
             )
 
             let remaining = UInt32(outputMaxBytes - totalBytesWritten)
-            bufferList.mBuffers.mDataByteSize = min(framesPerRead * outChannels * 4, remaining)
+            outputBuffer.mBuffers.mDataByteSize = min(framesPerBuffer * outChannels * 4, remaining)
 
-            var frameCount = framesPerRead
-            status = ExtAudioFileRead(extFile, &frameCount, &bufferList)
+            status = AudioConverterFillComplexBuffer(
+                converter, Self.aacInputProc, &context,
+                &outputFrames, &outputBuffer, nil)
 
-            if status != noErr || frameCount == 0 { break }
+            if outputFrames == 0 { break }
+            if status != noErr {
+                print("VirtioVideoDecode: AudioConverterFillComplexBuffer failed: \(status)")
+                break
+            }
 
-            totalBytesWritten += Int(bufferList.mBuffers.mDataByteSize)
+            totalBytesWritten += Int(outputBuffer.mBuffers.mDataByteSize)
         }
 
         return totalBytesWritten
     }
 
-    private func parseASC(configPtr: UnsafeMutableRawPointer, configSize: Int) -> (UInt8, UInt8, UInt8) {
-        // Walk ESDS to find the 0x05 DecoderSpecificInfo tag
+    private func extractASCFromESDS(configPtr: UnsafeMutableRawPointer, configSize: Int) -> Data? {
         let data = Data(bytes: configPtr, count: configSize)
         var pos = 0
 
-        func skipDescTag(_ expected: UInt8) -> Bool {
-            guard pos < data.count, data[pos] == expected else { return false }
-            pos += 1
+        func readDescLength() -> Int? {
+            var length = 0
             for _ in 0..<4 {
-                guard pos < data.count else { return false }
+                guard pos < data.count else { return nil }
                 let b = data[pos]; pos += 1
-                if b & 0x80 == 0 { return true }
+                length = (length << 7) | Int(b & 0x7F)
+                if b & 0x80 == 0 { return length }
             }
-            return false
+            return nil
         }
 
-        // 0x03 ES_Descriptor
-        guard skipDescTag(0x03), pos + 3 <= data.count else { return (2, 4, 2) }
-        pos += 3 // ES_ID + flags
+        guard pos < data.count, data[pos] == 0x03 else { return nil }
+        pos += 1
+        guard readDescLength() != nil, pos + 3 <= data.count else { return nil }
+        pos += 3
 
-        // 0x04 DecoderConfigDescriptor
-        guard skipDescTag(0x04), pos + 13 <= data.count else { return (2, 4, 2) }
+        guard pos < data.count, data[pos] == 0x04 else { return nil }
+        pos += 1
+        guard readDescLength() != nil, pos + 13 <= data.count else { return nil }
         pos += 13
 
-        // 0x05 DecoderSpecificInfo (AudioSpecificConfig)
-        guard skipDescTag(0x05), pos + 2 <= data.count else { return (2, 4, 2) }
+        guard pos < data.count, data[pos] == 0x05 else { return nil }
+        pos += 1
+        guard let ascLen = readDescLength(), pos + ascLen <= data.count else { return nil }
 
-        let bits = (UInt16(data[pos]) << 8) | UInt16(data[pos + 1])
-        let aot = UInt8((bits >> 11) & 0x1F)
-        let freqIdx = UInt8((bits >> 7) & 0xF)
-        let chanCfg = UInt8((bits >> 3) & 0xF)
-
-        return (aot, freqIdx, chanCfg)
+        return Data(data[pos..<(pos + ascLen)])
     }
 
     // MARK: - Decode queue
