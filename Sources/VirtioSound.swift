@@ -53,16 +53,21 @@ private let VIRTIO_SND_PCM_RATE_96000: UInt64 = 1 << 8
 private final class AudioRingBuffer {
     private let buffer: UnsafeMutableRawPointer
     private let capacity: Int
-    // Aligned 64-bit values — atomic on ARM64. Accessed via volatile-style
-    // pointer operations to prevent Swift from caching in registers.
     private let headPtr: UnsafeMutablePointer<Int>
     private let tailPtr: UnsafeMutablePointer<Int>
+    let cumulativeReadPtr: UnsafeMutablePointer<Int64>
+    var completionSource: DispatchSourceUserDataAdd?
 
     var fillLevel: Int {
         OSMemoryBarrier()
         let h = headPtr.pointee
         let t = tailPtr.pointee
         return h >= t ? h - t : capacity - t + h
+    }
+
+    var cumulativeRead: Int64 {
+        OSMemoryBarrier()
+        return cumulativeReadPtr.pointee
     }
 
     init(capacity: Int) {
@@ -73,12 +78,15 @@ private final class AudioRingBuffer {
         self.headPtr.initialize(to: 0)
         self.tailPtr = .allocate(capacity: 1)
         self.tailPtr.initialize(to: 0)
+        self.cumulativeReadPtr = .allocate(capacity: 1)
+        self.cumulativeReadPtr.initialize(to: 0)
     }
 
     deinit {
         buffer.deallocate()
         headPtr.deallocate()
         tailPtr.deallocate()
+        cumulativeReadPtr.deallocate()
     }
 
     func write(_ src: UnsafeRawPointer, count: Int) -> Int {
@@ -118,8 +126,19 @@ private final class AudioRingBuffer {
 
         OSMemoryBarrier()
         tailPtr.pointee = (t + toRead) % capacity
+        cumulativeReadPtr.pointee += Int64(toRead)
+
+        completionSource?.add(data: 1)
 
         return toRead
+    }
+
+    func reset() {
+        OSMemoryBarrier()
+        headPtr.pointee = 0
+        tailPtr.pointee = 0
+        cumulativeReadPtr.pointee = 0
+        OSMemoryBarrier()
     }
 }
 
@@ -166,6 +185,14 @@ private final class StreamState {
 
 // MARK: - VirtioSoundBackend
 
+private struct PendingTxCompletion {
+    let headIndex: UInt16
+    let bytesWritten: UInt32
+    let readThreshold: Int64
+    let txState: VirtqueueState
+    let statusGPA: UInt64
+}
+
 final class VirtioSoundBackend: VirtioDeviceBackend {
     let deviceId: UInt32 = 25  // virtio-snd
     let deviceFeatures: UInt64 = 0
@@ -182,6 +209,13 @@ final class VirtioSoundBackend: VirtioDeviceBackend {
 
     private let eventLock = NSLock()
     private var pendingEvents: [(UInt32)] = []
+
+    private var pendingTx: [PendingTxCompletion] = []
+    private var cumulativeWritten: Int64 = 0
+    private let txLock = NSLock()
+    private weak var vm: VirtualMachine?
+
+    private var completionSource: DispatchSourceUserDataAdd?
 
     private var dumpFile: FileHandle?
     private var dumpDataBytes: UInt32 = 0
@@ -236,6 +270,68 @@ final class VirtioSoundBackend: VirtioDeviceBackend {
         print("VirtioSnd: audio dump finalized (\(dataLen) bytes, \(durationMs)ms)")
     }
 
+    // MARK: - Deferred TX completion
+
+    private func setupCompletionSource() {
+        guard completionSource == nil else { return }
+        let source = DispatchSource.makeUserDataAddSource(queue: audioQueue)
+        source.setEventHandler { [weak self] in
+            self?.resolvePendingCompletions()
+        }
+        source.resume()
+        completionSource = source
+        outputStream.ring.completionSource = source
+    }
+
+    private func resolvePendingCompletions() {
+        let consumed = outputStream.ring.cumulativeRead
+        var resolved: [PendingTxCompletion] = []
+
+        txLock.lock()
+        while let first = pendingTx.first, consumed >= first.readThreshold {
+            resolved.append(pendingTx.removeFirst())
+        }
+        txLock.unlock()
+
+        guard let vm, !resolved.isEmpty else { return }
+
+        for entry in resolved {
+            virtqueuePushUsed(
+                state: entry.txState, vm: vm,
+                headIndex: entry.headIndex, bytesWritten: entry.bytesWritten)
+        }
+        transport?.raiseInterrupt()
+    }
+
+    func stopPlayback() {
+        audioQueue.sync {
+            if let au = outputStream.audioUnit {
+                AudioOutputUnitStop(au)
+            }
+        }
+
+        txLock.lock()
+        let all = pendingTx
+        pendingTx.removeAll()
+        cumulativeWritten = 0
+        txLock.unlock()
+
+        outputStream.ring.reset()
+
+        guard let vm, !all.isEmpty else { return }
+
+        for entry in all {
+            if entry.statusGPA != 0, let statusPtr = vm.guestToHost(entry.statusGPA) {
+                statusPtr.storeBytes(
+                    of: VIRTIO_SND_S_IO_ERR.littleEndian, toByteOffset: 0, as: UInt32.self)
+            }
+            virtqueuePushUsed(
+                state: entry.txState, vm: vm,
+                headIndex: entry.headIndex, bytesWritten: entry.bytesWritten)
+        }
+        transport?.raiseInterrupt()
+    }
+
     // MARK: - Config space
 
     func configRead(offset: UInt64) -> UInt32 {
@@ -252,6 +348,7 @@ final class VirtioSoundBackend: VirtioDeviceBackend {
     // MARK: - Queue notify
 
     func handleNotify(queue: Int, state: VirtqueueState, vm: VirtualMachine) {
+        self.vm = vm
         switch queue {
         case 0: handleControlQueue(state: state, vm: vm)
         case 1: handleEventQueue(state: state, vm: vm)
@@ -565,22 +662,22 @@ final class VirtioSoundBackend: VirtioDeviceBackend {
                                      kAudioUnitScope_Input, 0, &asbd, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
 
                 let ring = stream.ring
+                self.setupCompletionSource()
                 var callbackStruct = AURenderCallbackStruct(
                     inputProc: { (inRefCon, _, _, _, inNumberFrames, ioData) -> OSStatus in
                         guard let ioData = ioData else { return noErr }
                         let ring = Unmanaged<AudioRingBuffer>.fromOpaque(inRefCon).takeUnretainedValue()
 
                         for bufIndex in 0..<Int(ioData.pointee.mNumberBuffers) {
-                            let buf = ioData.pointee.mBuffers  // For single buffer
+                            let buf = ioData.pointee.mBuffers
                             guard let data = buf.mData else { continue }
                             let needed = Int(buf.mDataByteSize)
                             let got = ring.read(data, count: needed)
                             if got < needed {
-                                // Fill remainder with silence
                                 data.advanced(by: got).initializeMemory(as: UInt8.self, repeating: 0, count: needed - got)
                             }
-                            _ = bufIndex  // suppress unused warning in single-buffer case
-                            break  // We handle mBuffers as a single interleaved buffer
+                            _ = bufIndex
+                            break
                         }
                         return noErr
                     },
@@ -699,15 +796,15 @@ final class VirtioSoundBackend: VirtioDeviceBackend {
 
     private func handleTxQueue(state: VirtqueueState, vm: VirtualMachine) {
         while let request = virtqueuePopAvail(state: state, vm: vm, lastSeenIdx: &lastAvailIdx[2]) {
-            // First descriptor: virtio_snd_pcm_xfer (readable, stream_id u32)
-            // Middle descriptors: PCM audio data (readable)
-            // Last descriptor: virtio_snd_pcm_status (writable, status u32 + latency_bytes u32)
+            var dataBytes: Int = 0
 
             for i in 1..<(request.buffers.count - 1) {
                 let buf = request.buffers[i]
                 guard !buf.isDeviceWritable,
                       let hostPtr = vm.guestToHost(buf.guestAddr) else { continue }
-                _ = outputStream.ring.write(hostPtr, count: Int(buf.length))
+
+                let written = outputStream.ring.write(hostPtr, count: Int(buf.length))
+                dataBytes += written
 
                 if let fh = dumpFile {
                     let data = Data(bytes: hostPtr, count: Int(buf.length))
@@ -716,22 +813,30 @@ final class VirtioSoundBackend: VirtioDeviceBackend {
                 }
             }
 
-            // Write status to last (writable) buffer
-            if let statusBuf = request.buffers.last,
-               statusBuf.isDeviceWritable,
-               let statusPtr = vm.guestToHost(statusBuf.guestAddr) {
-                statusPtr.storeBytes(of: VIRTIO_SND_S_OK.littleEndian, toByteOffset: 0, as: UInt32.self)
-                let latency = UInt32(outputStream.ring.fillLevel)
-                statusPtr.storeBytes(of: latency.littleEndian, toByteOffset: 4, as: UInt32.self)
+            var statusGPA: UInt64 = 0
 
-                virtqueuePushUsed(state: state, vm: vm,
-                                  headIndex: request.headIndex, bytesWritten: 8)
-            } else {
-                virtqueuePushUsed(state: state, vm: vm,
-                                  headIndex: request.headIndex, bytesWritten: 0)
+            if let statusBuf = request.buffers.last, statusBuf.isDeviceWritable {
+                statusGPA = statusBuf.guestAddr
+
+                if let statusPtr = vm.guestToHost(statusBuf.guestAddr) {
+                    statusPtr.storeBytes(
+                        of: VIRTIO_SND_S_OK.littleEndian, toByteOffset: 0, as: UInt32.self)
+                    statusPtr.storeBytes(
+                        of: UInt32(0).littleEndian, toByteOffset: 4, as: UInt32.self)
+                }
             }
+
+            txLock.lock()
+            cumulativeWritten += Int64(dataBytes)
+            pendingTx.append(PendingTxCompletion(
+                headIndex: request.headIndex,
+                bytesWritten: 8,
+                readThreshold: cumulativeWritten,
+                txState: state,
+                statusGPA: statusGPA
+            ))
+            txLock.unlock()
         }
-        transport?.raiseInterrupt()
     }
 
     // MARK: - RX queue (audio input / capture)

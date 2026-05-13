@@ -9,6 +9,7 @@
 ///   - Queue 0 (controlq): session management (create/destroy/flush)
 ///   - Queue 1 (decodeq): frame submission and decode
 
+import AudioToolbox
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -21,6 +22,8 @@ import VideoToolbox
 private let VDEC_CREATE_SESSION: UInt32 = 0x01
 private let VDEC_DESTROY_SESSION: UInt32 = 0x02
 private let VDEC_FLUSH_SESSION: UInt32 = 0x03
+private let VDEC_DECODE_AUDIO: UInt32 = 0x04
+private let VDEC_STOP_AUDIO: UInt32 = 0x05
 
 private let VDEC_OK: UInt32 = 0x0000
 private let VDEC_ERR_INVALID_SESSION: UInt32 = 0x0001
@@ -91,6 +94,11 @@ private final class VideoDecodeSession {
         self.vtSession = vtSession
         self.textureHandle = textureHandle
     }
+
+    deinit {
+        VTDecompressionSessionInvalidate(vtSession)
+        lastDecodedBuffer = nil
+    }
 }
 
 // MARK: - VirtioVideoDecodeBackend
@@ -104,6 +112,7 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
 
     private let textureRegistry: TextureRegistry
     private let metalDevice: MTLDevice
+    private weak var soundBackend: VirtioSoundBackend?
     private var sessions: [UInt32: VideoDecodeSession] = [:]
     private var lastAvailIdx: [UInt16] = [0, 0]
     private let supportedCodecs: UInt32
@@ -117,9 +126,19 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
     private var metricsCopyTotalUs: Double = 0
     private var metricsCopyMaxUs: Double = 0
 
-    init(textureRegistry: TextureRegistry, metalDevice: MTLDevice) {
+    deinit {
+        for (_, session) in sessions {
+            textureRegistry.remove(session.textureHandle)
+        }
+        sessions.removeAll()
+    }
+
+    init(textureRegistry: TextureRegistry, metalDevice: MTLDevice,
+         soundBackend: VirtioSoundBackend? = nil)
+    {
         self.textureRegistry = textureRegistry
         self.metalDevice = metalDevice
+        self.soundBackend = soundBackend
 
         var codecs: UInt32 = 0
         codecs |= (1 << 0) // MJPEG — always available via VideoToolbox
@@ -193,6 +212,14 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
             return handleDestroySession(headerPtr: headerPtr, responsePtr: responsePtr)
         case VDEC_FLUSH_SESSION:
             return handleFlushSession(headerPtr: headerPtr, responsePtr: responsePtr)
+        case VDEC_DECODE_AUDIO:
+            return handleDecodeAudio(buffers: buffers, headerPtr: headerPtr,
+                                     headerLen: firstBuf.length,
+                                     responsePtr: responsePtr, vm: vm)
+        case VDEC_STOP_AUDIO:
+            soundBackend?.stopPlayback()
+            responsePtr.storeBytes(of: VDEC_OK.littleEndian, toByteOffset: 0, as: UInt32.self)
+            return 4
         default:
             responsePtr.storeBytes(
                 of: VDEC_ERR_BAD_REQUEST.littleEndian,
@@ -381,6 +408,213 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
         session.vtSession = newSession
         responsePtr.storeBytes(of: VDEC_OK.littleEndian, toByteOffset: 0, as: UInt32.self)
         return 4
+    }
+
+    // MARK: - Audio decode (AAC → F32 PCM via AudioToolbox)
+
+    private func handleDecodeAudio(
+        buffers: [VirtqueueBuffer],
+        headerPtr: UnsafeMutableRawPointer,
+        headerLen: UInt32,
+        responsePtr: UnsafeMutableRawPointer,
+        vm: VirtualMachine
+    ) -> UInt32 {
+        // Header layout (32 bytes):
+        //   0: request_type (u32)
+        //   4: codec (u8)
+        //   5: channels (u8)
+        //   6: reserved (u16)
+        //   8: sample_rate (u32)
+        //  12: config_size (u32)
+        //  16: num_frames (u32)
+        //  20: data_size (u32)
+        guard headerLen >= 24 else {
+            writeError(responsePtr, VDEC_ERR_BAD_REQUEST)
+            return 8
+        }
+
+        let codec = headerPtr.loadUnaligned(fromByteOffset: 4, as: UInt8.self)
+        let channels = headerPtr.loadUnaligned(fromByteOffset: 5, as: UInt8.self)
+        let sampleRate = headerPtr.loadUnaligned(fromByteOffset: 8, as: UInt32.self)
+        let configSize = headerPtr.loadUnaligned(fromByteOffset: 12, as: UInt32.self)
+        let numFrames = headerPtr.loadUnaligned(fromByteOffset: 16, as: UInt32.self)
+        let dataSize = headerPtr.loadUnaligned(fromByteOffset: 20, as: UInt32.self)
+
+        guard codec == 0 /* AAC */ else {
+            writeError(responsePtr, VDEC_ERR_UNSUPPORTED)
+            return 8
+        }
+
+        // Descriptor 1: audio data (config + frame sizes + compressed data)
+        guard let dataBuf = buffers.dropFirst().first(where: { !$0.isDeviceWritable }),
+              let dataPtr = vm.guestToHost(dataBuf.guestAddr),
+              dataBuf.length >= configSize + numFrames * 4 + dataSize
+        else {
+            writeError(responsePtr, VDEC_ERR_BAD_REQUEST)
+            return 8
+        }
+
+        // First writable descriptor = PCM output
+        let writableBuffers = buffers.filter { $0.isDeviceWritable }
+        guard writableBuffers.count >= 2,
+              let pcmBuf = writableBuffers.first,
+              let pcmPtr = vm.guestToHost(pcmBuf.guestAddr)
+        else {
+            writeError(responsePtr, VDEC_ERR_BAD_REQUEST)
+            return 8
+        }
+
+        let configPtr = dataPtr
+        let sizesPtr = dataPtr.advanced(by: Int(configSize))
+        let compressedPtr = dataPtr.advanced(by: Int(configSize + numFrames * 4))
+
+        let pcmBytes = decodeAACToPCM(
+            configPtr: configPtr, configSize: Int(configSize),
+            sizesPtr: sizesPtr, numFrames: Int(numFrames),
+            compressedPtr: compressedPtr, compressedSize: Int(dataSize),
+            sampleRate: Double(sampleRate), channels: UInt32(channels),
+            outputPtr: pcmPtr, outputMaxBytes: Int(pcmBuf.length))
+
+        responsePtr.storeBytes(of: VDEC_OK.littleEndian, toByteOffset: 0, as: UInt32.self)
+        responsePtr.storeBytes(of: UInt32(pcmBytes).littleEndian, toByteOffset: 4, as: UInt32.self)
+
+        print("VirtioVideoDecode: audio decoded \(numFrames) frames → \(pcmBytes) bytes PCM"
+              + " (\(sampleRate) Hz, \(channels) ch)")
+        return 8
+    }
+
+    private func decodeAACToPCM(
+        configPtr: UnsafeMutableRawPointer, configSize: Int,
+        sizesPtr: UnsafeMutableRawPointer, numFrames: Int,
+        compressedPtr: UnsafeMutableRawPointer, compressedSize: Int,
+        sampleRate: Double, channels: UInt32,
+        outputPtr: UnsafeMutableRawPointer, outputMaxBytes: Int
+    ) -> Int {
+        // Parse AudioSpecificConfig from the ESDS to get profile/freq/channels
+        // for ADTS header construction.
+        let (ascProfile, ascFreqIdx, ascChannels) = parseASC(
+            configPtr: configPtr, configSize: configSize)
+
+        // Build ADTS stream: 7-byte header per frame + raw AAC data
+        var adtsData = Data()
+        var offset = 0
+        for i in 0..<numFrames {
+            let frameSize = Int(sizesPtr.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self))
+            let adtsFrameLen = frameSize + 7
+
+            var hdr = [UInt8](repeating: 0, count: 7)
+            hdr[0] = 0xFF
+            hdr[1] = 0xF1
+            hdr[2] = ((ascProfile - 1) << 6) | (ascFreqIdx << 2) | (ascChannels >> 2)
+            hdr[3] = ((ascChannels & 3) << 6) | UInt8((adtsFrameLen >> 11) & 3)
+            hdr[4] = UInt8((adtsFrameLen >> 3) & 0xFF)
+            hdr[5] = UInt8((adtsFrameLen & 7) << 5) | 0x1F
+            hdr[6] = 0xFC
+
+            adtsData.append(contentsOf: hdr)
+            adtsData.append(Data(bytes: compressedPtr.advanced(by: offset), count: frameSize))
+            offset += frameSize
+        }
+
+        // Write to temp file
+        let tmpPath = "/tmp/_vdec_audio_\(ProcessInfo.processInfo.processIdentifier).aac"
+        let tmpURL = URL(fileURLWithPath: tmpPath)
+        do { try adtsData.write(to: tmpURL) } catch {
+            print("VirtioVideoDecode: failed to write temp AAC: \(error)")
+            return 0
+        }
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        // Open with ExtAudioFile and read as F32 interleaved stereo
+        var extFile: ExtAudioFileRef?
+        var status = ExtAudioFileOpenURL(tmpURL as CFURL, &extFile)
+        guard status == noErr, let extFile else {
+            print("VirtioVideoDecode: ExtAudioFileOpenURL failed: \(status)")
+            return 0
+        }
+        defer { ExtAudioFileDispose(extFile) }
+
+        let outChannels: UInt32 = 2
+        var clientFormat = AudioStreamBasicDescription(
+            mSampleRate: 48000,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: outChannels * 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: outChannels * 4,
+            mChannelsPerFrame: outChannels,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+
+        status = ExtAudioFileSetProperty(
+            extFile, kExtAudioFileProperty_ClientDataFormat,
+            UInt32(MemoryLayout<AudioStreamBasicDescription>.size), &clientFormat)
+        guard status == noErr else {
+            print("VirtioVideoDecode: set client format failed: \(status)")
+            return 0
+        }
+
+        var totalBytesWritten = 0
+        let framesPerRead: UInt32 = 4096
+
+        while totalBytesWritten < outputMaxBytes {
+            var bufferList = AudioBufferList(
+                mNumberBuffers: 1,
+                mBuffers: AudioBuffer(
+                    mNumberChannels: outChannels,
+                    mDataByteSize: framesPerRead * outChannels * 4,
+                    mData: outputPtr.advanced(by: totalBytesWritten)
+                )
+            )
+
+            let remaining = UInt32(outputMaxBytes - totalBytesWritten)
+            bufferList.mBuffers.mDataByteSize = min(framesPerRead * outChannels * 4, remaining)
+
+            var frameCount = framesPerRead
+            status = ExtAudioFileRead(extFile, &frameCount, &bufferList)
+
+            if status != noErr || frameCount == 0 { break }
+
+            totalBytesWritten += Int(bufferList.mBuffers.mDataByteSize)
+        }
+
+        return totalBytesWritten
+    }
+
+    private func parseASC(configPtr: UnsafeMutableRawPointer, configSize: Int) -> (UInt8, UInt8, UInt8) {
+        // Walk ESDS to find the 0x05 DecoderSpecificInfo tag
+        let data = Data(bytes: configPtr, count: configSize)
+        var pos = 0
+
+        func skipDescTag(_ expected: UInt8) -> Bool {
+            guard pos < data.count, data[pos] == expected else { return false }
+            pos += 1
+            for _ in 0..<4 {
+                guard pos < data.count else { return false }
+                let b = data[pos]; pos += 1
+                if b & 0x80 == 0 { return true }
+            }
+            return false
+        }
+
+        // 0x03 ES_Descriptor
+        guard skipDescTag(0x03), pos + 3 <= data.count else { return (2, 4, 2) }
+        pos += 3 // ES_ID + flags
+
+        // 0x04 DecoderConfigDescriptor
+        guard skipDescTag(0x04), pos + 13 <= data.count else { return (2, 4, 2) }
+        pos += 13
+
+        // 0x05 DecoderSpecificInfo (AudioSpecificConfig)
+        guard skipDescTag(0x05), pos + 2 <= data.count else { return (2, 4, 2) }
+
+        let bits = (UInt16(data[pos]) << 8) | UInt16(data[pos + 1])
+        let aot = UInt8((bits >> 11) & 0x1F)
+        let freqIdx = UInt8((bits >> 7) & 0xF)
+        let chanCfg = UInt8((bits >> 3) & 0xF)
+
+        return (aot, freqIdx, chanCfg)
     }
 
     // MARK: - Decode queue
@@ -781,3 +1015,4 @@ final class VirtioVideoDecodeBackend: VirtioDeviceBackend {
         return statusBuf.length
     }
 }
+

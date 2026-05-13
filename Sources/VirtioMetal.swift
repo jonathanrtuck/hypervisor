@@ -766,9 +766,35 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 blue: Double(clearB), alpha: Double(clearA))
 
             if stencilTex != 0, let sTex = textureRegistry.lookup(stencilTex) {
-                passDesc.stencilAttachment.texture = sTex
-                passDesc.stencilAttachment.loadAction = .clear
-                passDesc.stencilAttachment.storeAction = .dontCare
+                if sTex.width == colorTexture.width && sTex.height == colorTexture.height {
+                    passDesc.stencilAttachment.texture = sTex
+                    passDesc.stencilAttachment.loadAction = .clear
+                    passDesc.stencilAttachment.storeAction = .dontCare
+                } else {
+                    print("VirtioMetal: stencil dimensions \(sTex.width)×\(sTex.height) don't match color \(colorTexture.width)×\(colorTexture.height) — skipping stencil")
+                }
+            }
+
+            if passDesc.colorAttachments[0].storeAction == .multisampleResolve {
+                let valid: Bool
+                if colorTexture.textureType != .type2DMultisample {
+                    print("VirtioMetal: multisampleResolve on non-MSAA texture — falling back to store")
+                    valid = false
+                } else if let rt = passDesc.colorAttachments[0].resolveTexture {
+                    if rt.width != colorTexture.width || rt.height != colorTexture.height {
+                        print("VirtioMetal: resolve texture \(rt.width)×\(rt.height) doesn't match color \(colorTexture.width)×\(colorTexture.height) — falling back to store")
+                        valid = false
+                    } else {
+                        valid = true
+                    }
+                } else {
+                    print("VirtioMetal: multisampleResolve without resolve texture — falling back to store")
+                    valid = false
+                }
+                if !valid {
+                    passDesc.colorAttachments[0].storeAction = .store
+                    passDesc.colorAttachments[0].resolveTexture = nil
+                }
             }
 
             currentRenderEncoder = currentCommandBuffer?.makeRenderCommandEncoder(descriptor: passDesc)
@@ -814,6 +840,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let bufIdx = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             let dataLen = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             guard size >= 8 + Int(dataLen) else { return }
+            guard dataLen > 0, dataLen <= 4096, bufIdx <= 30 else {
+                print("VirtioMetal: setVertexBytes rejected — length=\(dataLen) index=\(bufIdx)")
+                return
+            }
             currentRenderEncoder?.setVertexBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
 
         case .setFragmentTexture:
@@ -837,6 +867,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let bufIdx = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             let dataLen = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             guard size >= 8 + Int(dataLen) else { return }
+            guard dataLen > 0, dataLen <= 4096, bufIdx <= 30 else {
+                print("VirtioMetal: setFragmentBytes rejected — length=\(dataLen) index=\(bufIdx)")
+                return
+            }
             currentRenderEncoder?.setFragmentBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
 
         case .drawPrimitives:
@@ -891,6 +925,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let bufIdx = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             let dataLen = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             guard size >= 8 + Int(dataLen) else { return }
+            guard dataLen > 0, dataLen <= 4096, bufIdx <= 30 else {
+                print("VirtioMetal: setComputeBytes rejected — length=\(dataLen) index=\(bufIdx)")
+                return
+            }
             currentComputeEncoder?.setBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
 
         case .dispatchThreads:

@@ -27,6 +27,18 @@ enum HypervisorError: Error, CustomStringConvertible {
     }
 }
 
+/// Guards hv_vm_destroy() so it executes exactly once (atexit or deinit,
+/// whichever fires first). A second call on an already-destroyed VM is
+/// undefined behavior in Hypervisor.framework.
+private var _vmDestroyed = false
+
+private func destroyVMOnce() {
+    if !_vmDestroyed {
+        _vmDestroyed = true
+        hv_vm_destroy()
+    }
+}
+
 final class VirtualMachine {
     let ramBase: UInt64
     let ramSize: Int
@@ -71,7 +83,7 @@ final class VirtualMachine {
         // Create the VM
         try hvCheck(hv_vm_create(nil), "hv_vm_create")
         // Ensure hv_vm_destroy runs even if exit() is called (bypassing deinit).
-        atexit { hv_vm_destroy() }
+        atexit { destroyVMOnce() }
         if verbose { print("  VM created") }
 
         // Create hardware GIC (must be after VM, before vCPUs)
@@ -101,7 +113,7 @@ final class VirtualMachine {
 
     deinit {
         munmap(ramPtr, ramSize)
-        hv_vm_destroy()
+        destroyVMOnce()
     }
 
     // MARK: - Guest memory access

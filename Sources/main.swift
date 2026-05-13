@@ -428,7 +428,8 @@ func main() throws {
         if config.videoDecode {
             let videoDec = VirtioVideoDecodeBackend(
                 textureRegistry: textureRegistry,
-                metalDevice: metalDevice)
+                metalDevice: metalDevice,
+                soundBackend: soundBackend)
             vm.addVirtioDevice(slot: 8, backend: videoDec)
             print("  Video decode: enabled (slot 8)")
         }
