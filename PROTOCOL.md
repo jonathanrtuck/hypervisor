@@ -593,6 +593,12 @@ on a staging copy — the live display is unaffected.
 | 0          | `.dontCare`      |
 | 1          | `.load`          |
 | 2          | `.clear`         |
+| 3          | `.blitRetained`  |
+
+Value 3 blits the retained frame to the drawable before the render pass begins,
+then uses `.dontCare` as the load action. Used for partial damage rendering: the
+guest marks damaged regions, the host preserves undamaged pixels from the
+previous frame via blit, then renders only the damaged areas.
 
 ### Store Action
 

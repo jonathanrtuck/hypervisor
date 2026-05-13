@@ -221,8 +221,10 @@ guest's `presentAndCommit` frame_id values. Uses standard Linux evdev key names
 0 text café ☕                # Full Unicode — one EV_TEXT event per codepoint
 15 key backspace             # Single key press at frame 15
 16 key shift+left            # Modified key (modifiers: shift, ctrl, alt, cmd)
-20 move 100 200              # Move pointer to (x, y)
+20 move 100 200              # Move pointer to (x, y) in points
+20 move 50% 50%              # Move pointer to center (percent of logical size)
 25 click 100 200             # Left click at (x, y) in points
+25 click 50% 50%             # Left click at center (percent of logical size)
 30 dblclick 100 200          # Double click (spans 2 consecutive frames)
 35 drag 100 200 300 200      # Drag from→to, 12 frames (steps+2, default 10)
 35 drag 100 200 300 200 20   # Drag with 20 steps → 22 frames

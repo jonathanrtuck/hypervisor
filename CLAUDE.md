@@ -51,7 +51,7 @@ If the kernel needs rebuilding:
 ## Architecture
 
 This is a native macOS ARM64 hypervisor built on Apple's Hypervisor.framework
-with Metal GPU passthrough. ~8500 lines of Swift, no external dependencies —
+with Metal GPU passthrough. ~9100 lines of Swift, no external dependencies —
 only Apple system frameworks (Hypervisor, Metal, AppKit, QuartzCore, Security,
 AudioToolbox, CoreAudio, VideoToolbox, CoreMedia, CoreVideo, vmnet).
 
