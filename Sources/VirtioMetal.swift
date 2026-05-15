@@ -699,6 +699,25 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         }
     }
 
+    // MARK: - Encoder state management
+
+    private func closeActiveEncoders() {
+        currentRenderEncoder?.endEncoding()
+        currentRenderEncoder = nil
+        currentComputeEncoder?.endEncoding()
+        currentComputeEncoder = nil
+        currentBlitEncoder?.endEncoding()
+        currentBlitEncoder = nil
+        pipelineStateSet = false
+    }
+
+    private func ensureCommandBuffer() -> MTLCommandBuffer? {
+        if let cb = currentCommandBuffer { return cb }
+        let cb = commandQueue.makeCommandBuffer()
+        currentCommandBuffer = cb
+        return cb
+    }
+
     // MARK: - Render command dispatch
 
     private func dispatchRenderCommand(methodId: UInt16, payload: UnsafeRawPointer, size: Int) {
@@ -710,6 +729,8 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         switch cmd {
         case .beginRenderPass:
             guard size >= 28 else { return }
+            closeActiveEncoders()
+
             let colorTex   = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             let resolveTex = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             let stencilTex = payload.loadUnaligned(fromByteOffset: 8, as: UInt32.self)
@@ -720,7 +741,6 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let clearB = payload.loadUnaligned(fromByteOffset: 24, as: Float.self)
             let clearA = size >= 32 ? payload.loadUnaligned(fromByteOffset: 28, as: Float.self) : 1.0
 
-            // Resolve texture handles — DRAWABLE_HANDLE means "use the drawable"
             let colorTexture: MTLTexture
             if colorTex == DRAWABLE_HANDLE {
                 guard let tex = resolveDrawable() else { return }
@@ -739,13 +759,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 resolveTexture = textureRegistry.lookup(resolveTex)
             }
 
-            // Lazily create the per-frame command buffer
-            if currentCommandBuffer == nil {
-                currentCommandBuffer = commandQueue.makeCommandBuffer()
-            }
+            guard let cb = ensureCommandBuffer() else { return }
 
             let isBlitRetained = MetalLoadActionWire(rawValue: loadAct) == .blitRetained
-            if isBlitRetained, let retained = retainedFrame, let cb = currentCommandBuffer {
+            if isBlitRetained, let retained = retainedFrame {
                 let sz = MTLSize(width: colorTexture.width, height: colorTexture.height, depth: 1)
                 let origin = MTLOrigin(x: 0, y: 0, z: 0)
                 let blit = cb.makeBlitCommandEncoder()!
@@ -797,7 +814,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 }
             }
 
-            currentRenderEncoder = currentCommandBuffer?.makeRenderCommandEncoder(descriptor: passDesc)
+            currentRenderEncoder = cb.makeRenderCommandEncoder(descriptor: passDesc)
 
         case .endRenderPass:
             currentRenderEncoder?.endEncoding()
@@ -805,38 +822,36 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             pipelineStateSet = false
 
         case .setRenderPipeline:
-            guard size >= 4 else { return }
+            guard size >= 4, let enc = currentRenderEncoder else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             if let pipeline = renderPipelines[handle] {
-                currentRenderEncoder?.setRenderPipelineState(pipeline)
+                enc.setRenderPipelineState(pipeline)
                 pipelineStateSet = true
-            } else {
-                print("VirtioMetal: setRenderPipeline — handle \(handle) not found (pipeline not created?)")
             }
 
         case .setDepthStencilState:
-            guard size >= 4 else { return }
+            guard size >= 4, let enc = currentRenderEncoder else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             if let state = depthStencilStates[handle] {
-                currentRenderEncoder?.setDepthStencilState(state)
+                enc.setDepthStencilState(state)
             }
 
         case .setStencilRef:
-            guard size >= 4 else { return }
+            guard size >= 4, let enc = currentRenderEncoder else { return }
             let val = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
-            currentRenderEncoder?.setStencilReferenceValue(val)
+            enc.setStencilReferenceValue(val)
 
         case .setScissor:
-            guard size >= 8 else { return }
+            guard size >= 8, let enc = currentRenderEncoder else { return }
             let x = payload.loadUnaligned(fromByteOffset: 0, as: UInt16.self)
             let y = payload.loadUnaligned(fromByteOffset: 2, as: UInt16.self)
             let w = payload.loadUnaligned(fromByteOffset: 4, as: UInt16.self)
             let h = payload.loadUnaligned(fromByteOffset: 6, as: UInt16.self)
-            currentRenderEncoder?.setScissorRect(MTLScissorRect(
+            enc.setScissorRect(MTLScissorRect(
                 x: Int(x), y: Int(y), width: Int(w), height: Int(h)))
 
         case .setVertexBytes:
-            guard size >= 8 else { return }
+            guard size >= 8, let enc = currentRenderEncoder else { return }
             let bufIdx = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             let dataLen = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             guard size >= 8 + Int(dataLen) else { return }
@@ -844,26 +859,26 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 print("VirtioMetal: setVertexBytes rejected — length=\(dataLen) index=\(bufIdx)")
                 return
             }
-            currentRenderEncoder?.setVertexBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
+            enc.setVertexBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
 
         case .setFragmentTexture:
-            guard size >= 8 else { return }
+            guard size >= 8, let enc = currentRenderEncoder else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             let idx = payload.loadUnaligned(fromByteOffset: 4, as: UInt8.self)
             if let tex = textureRegistry.lookup(handle) {
-                currentRenderEncoder?.setFragmentTexture(tex, index: Int(idx))
+                enc.setFragmentTexture(tex, index: Int(idx))
             }
 
         case .setFragmentSampler:
-            guard size >= 8 else { return }
+            guard size >= 8, let enc = currentRenderEncoder else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             let idx = payload.loadUnaligned(fromByteOffset: 4, as: UInt8.self)
             if let s = samplers[handle] {
-                currentRenderEncoder?.setFragmentSamplerState(s, index: Int(idx))
+                enc.setFragmentSamplerState(s, index: Int(idx))
             }
 
         case .setFragmentBytes:
-            guard size >= 8 else { return }
+            guard size >= 8, let enc = currentRenderEncoder else { return }
             let bufIdx = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             let dataLen = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             guard size >= 8 + Int(dataLen) else { return }
@@ -871,43 +886,37 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 print("VirtioMetal: setFragmentBytes rejected — length=\(dataLen) index=\(bufIdx)")
                 return
             }
-            currentRenderEncoder?.setFragmentBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
+            enc.setFragmentBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
 
         case .drawPrimitives:
-            guard size >= 12 else { return }
-            guard pipelineStateSet else {
-                print("VirtioMetal: drawPrimitives called without a render pipeline state — skipping (would crash Metal driver)")
-                return
-            }
+            guard size >= 12, let enc = currentRenderEncoder, pipelineStateSet else { return }
             let primType = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             let vertStart = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             let vertCount = payload.loadUnaligned(fromByteOffset: 8, as: UInt32.self)
-            currentRenderEncoder?.drawPrimitives(
+            guard vertCount > 0 else { return }
+            enc.drawPrimitives(
                 type: mapPrimitiveType(primType),
                 vertexStart: Int(vertStart),
                 vertexCount: Int(vertCount))
 
         case .beginComputePass:
-            if currentCommandBuffer == nil {
-                currentCommandBuffer = commandQueue.makeCommandBuffer()
-            }
-            if currentComputeEncoder == nil {
-                currentComputeEncoder = currentCommandBuffer?.makeComputeCommandEncoder()
-            }
+            closeActiveEncoders()
+            guard let cb = ensureCommandBuffer() else { return }
+            currentComputeEncoder = cb.makeComputeCommandEncoder()
 
         case .endComputePass:
             currentComputeEncoder?.endEncoding()
             currentComputeEncoder = nil
 
         case .setComputePipeline:
-            guard size >= 4 else { return }
+            guard size >= 4, let enc = currentComputeEncoder else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             if let pipeline = computePipelines[handle] {
-                currentComputeEncoder?.setComputePipelineState(pipeline)
+                enc.setComputePipelineState(pipeline)
             }
 
         case .setComputeTexture:
-            guard size >= 8 else { return }
+            guard size >= 8, let enc = currentComputeEncoder else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             let idx = payload.loadUnaligned(fromByteOffset: 4, as: UInt8.self)
             let tex: MTLTexture?
@@ -917,11 +926,11 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 tex = textureRegistry.lookup(handle)
             }
             if let tex {
-                currentComputeEncoder?.setTexture(tex, index: Int(idx))
+                enc.setTexture(tex, index: Int(idx))
             }
 
         case .setComputeBytes:
-            guard size >= 8 else { return }
+            guard size >= 8, let enc = currentComputeEncoder else { return }
             let bufIdx = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
             let dataLen = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             guard size >= 8 + Int(dataLen) else { return }
@@ -929,34 +938,32 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 print("VirtioMetal: setComputeBytes rejected — length=\(dataLen) index=\(bufIdx)")
                 return
             }
-            currentComputeEncoder?.setBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
+            enc.setBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
 
         case .dispatchThreads:
-            guard size >= 12 else { return }
+            guard size >= 12, let enc = currentComputeEncoder else { return }
             let gx = payload.loadUnaligned(fromByteOffset: 0, as: UInt16.self)
             let gy = payload.loadUnaligned(fromByteOffset: 2, as: UInt16.self)
             let gz = payload.loadUnaligned(fromByteOffset: 4, as: UInt16.self)
             let tx = payload.loadUnaligned(fromByteOffset: 6, as: UInt16.self)
             let ty = payload.loadUnaligned(fromByteOffset: 8, as: UInt16.self)
             let tz = payload.loadUnaligned(fromByteOffset: 10, as: UInt16.self)
-            currentComputeEncoder?.dispatchThreads(
+            guard gx > 0, gy > 0, gz > 0, tx > 0, ty > 0, tz > 0 else { return }
+            enc.dispatchThreads(
                 MTLSize(width: Int(gx), height: Int(gy), depth: Int(gz)),
                 threadsPerThreadgroup: MTLSize(width: Int(tx), height: Int(ty), depth: Int(tz)))
 
         case .beginBlitPass:
-            if currentCommandBuffer == nil {
-                currentCommandBuffer = commandQueue.makeCommandBuffer()
-            }
-            if currentBlitEncoder == nil {
-                currentBlitEncoder = currentCommandBuffer?.makeBlitCommandEncoder()
-            }
+            closeActiveEncoders()
+            guard let cb = ensureCommandBuffer() else { return }
+            currentBlitEncoder = cb.makeBlitCommandEncoder()
 
         case .endBlitPass:
             currentBlitEncoder?.endEncoding()
             currentBlitEncoder = nil
 
         case .copyTextureRegion:
-            guard size >= 20 else { return }
+            guard size >= 20, let enc = currentBlitEncoder else { return }
             let srcHandle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             let dstHandle = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
             let sx = payload.loadUnaligned(fromByteOffset: 8, as: UInt16.self)
@@ -966,11 +973,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let dx = payload.loadUnaligned(fromByteOffset: 16, as: UInt16.self)
             let dy = payload.loadUnaligned(fromByteOffset: 18, as: UInt16.self)
 
-            // DRAWABLE_HANDLE → use the current drawable's texture.
             let srcTex: MTLTexture? = srcHandle == DRAWABLE_HANDLE ? resolveDrawable() : textureRegistry.lookup(srcHandle)
             let dstTex: MTLTexture? = dstHandle == DRAWABLE_HANDLE ? resolveDrawable() : textureRegistry.lookup(dstHandle)
-            guard let srcTex, let dstTex else { return }
-            currentBlitEncoder?.copy(
+            guard let srcTex, let dstTex, sw > 0, sh > 0 else { return }
+            enc.copy(
                 from: srcTex, sourceSlice: 0, sourceLevel: 0,
                 sourceOrigin: MTLOrigin(x: Int(sx), y: Int(sy), z: 0),
                 sourceSize: MTLSize(width: Int(sw), height: Int(sh), depth: 1),
@@ -1102,6 +1108,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 print("VirtioMetal: presentAndCommit missing frame_id payload")
                 break
             }
+            closeActiveEncoders()
             let frameId = Int(payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
             let presentT0 = CFAbsoluteTimeGetCurrent()
             if offscreenDrawable != nil {
